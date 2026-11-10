@@ -13,16 +13,26 @@ export const isAndroid = /Android/i.test(ua);
 /** iPhone 的 UA 也带「like Mac OS X」，必须先于 macOS 判断；iPadOS 默认伪装成 Mac，用触点数区分。 */
 export const isIos = /iPhone|iPad|iPod/i.test(ua) || (/Macintosh/i.test(ua) && navigator.maxTouchPoints > 1);
 export const isMacos = !isIos && /Macintosh|Mac OS X/i.test(ua);
-export const platform: "android" | "ios" | "windows" | "macos" =
-  isAndroid ? "android" : isIos ? "ios" : isMacos ? "macos" : "windows";
+/** Linux 桌面：webkit2gtk 的 UA 是「X11; Linux x86_64」。必须排在 Windows 之前判断，
+ *  否则会被当成 Windows；而 Android 的 UA 里同样带「Linux」，所以必须先排除安卓。 */
+export const isLinux = !isAndroid && !isIos && !isMacos && /Linux|X11/i.test(ua);
+export const platform: "android" | "ios" | "windows" | "macos" | "linux" =
+  isAndroid ? "android" : isIos ? "ios" : isMacos ? "macos" : isLinux ? "linux" : "windows";
+/** WebView 内核版本：能不能走 MSE、能解哪些封装，是「无法播放」的首要判据。
+ *  安卓取 Chrome/xxx（System WebView），Linux/macOS 取 WebKit 的 Version/xxx。 */
+export const webviewVersion =
+  /Chrome\/([\d.]+)/.exec(ua)?.[1] || /Version\/([\d.]+)/.exec(ua)?.[1] || "?";
 /** 移动端（安卓 / iOS）共用触屏界面 */
 export const isMobile = isAndroid || isIos;
 
-/** 自定义协议地址随平台不同（见 tauri `register_asynchronous_uri_scheme_protocol` 文档）：
- *  Windows / Android → `http://<scheme>.localhost`
- *  macOS / iOS / Linux → `<scheme>://localhost`
- *  Rust 侧 `src-tauri/src/lib.rs` 里改写 m3u8 用的 scheme 必须与此一致。 */
-export const LOCAL = isMacos || isIos ? "hg://localhost" : "http://hg.localhost";
+/** 媒体基址随平台不同（Rust 侧对应 `media::LOCAL_ORIGIN`，两边必须一致）：
+ *  Windows / Android → `http://<scheme>.localhost`（自定义协议，WebView 自己加载）
+ *  macOS / iOS → `hg://localhost`（WebKit 的 scheme handler）
+ *  Linux → `http://127.0.0.1:17650`：WebKitGTK 的 <video> 由 GStreamer 播放，
+ *          它拿不到自定义 scheme，所以由 Rust 侧在 loopback 上起 HTTP 代理
+ *          （`src-tauri/src/linux_http.rs`，端口必须与此一致）。 */
+export const LOCAL =
+  isMacos || isIos ? "hg://localhost" : isLinux ? "http://127.0.0.1:17650" : "http://hg.localhost";
 
 /** src 是否已是本地协议地址（避免在详情页把代理地址再包一层） */
 export const isLocalMedia = (src: string) => src.startsWith(`${LOCAL}/`);
@@ -39,18 +49,55 @@ export const playlist = (url: string) => `${LOCAL}/hls?u=${encodeURIComponent(ur
 /** 写一行到应用数据目录 debug.log（用户反馈「打不开」时要的就是它） */
 export const logLine = (msg: string) => invoke("debug_log", { msg }).catch(() => {});
 
+/** 网络类失败的样子：没有 HTTP 状态码，纯链路层（DNS / 连接 / 超时 / TLS） */
+const NET_FAIL = /dns|timed? ?out|timeout|connection|refused|reset|unreachable|broken pipe|tls|ssl|handshake|证书|网络|连接/i;
+/** 只读命令：链路抖动时可以安全重试一次；写操作绝不重试（避免重复提交） */
+const READ_ONLY = new Set([
+  "api_me", "api_feed", "api_category", "api_rank", "api_search",
+  "api_posts", "api_post", "api_post_comments", "api_video", "api_play", "api_comments",
+]);
+/** 给自动选线用的观察点。api.ts 不反向依赖 autoLine，避免循环 import。 */
+export type NetObserver = (r: { ok: boolean; cmd: string; msg?: string; networkish?: boolean }) => void;
+let netObserver: NetObserver | null = null;
+export const setNetObserver = (fn: NetObserver | null) => { netObserver = fn; };
+const notifyNet = (r: Parameters<NetObserver>[0]) => {
+  try { netObserver?.(r); } catch { /* 观察者不能影响请求本身 */ }
+};
+const failMessage = (msg: string, status?: string) =>
+  status
+    ? `服务器请求失败（HTTP ${status}），请稍后重试或在设置中切换线路`
+    : msg.length > 140 ? `${msg.slice(0, 140)}…` : msg;
+
 async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  const once = () => invoke(cmd, args) as Promise<T>;
   try {
-    return (await invoke(cmd, args)) as T;
+    const r = await once();
+    notifyNet({ ok: true, cmd });
+    return r;
   } catch (e) {
     const msg = typeof e === "string" ? e : "请求失败，请检查网络";
     // 落盘完整错误链（dns error / connection refused / 证书错误…），toast 只显示截断版
     logLine(`[api] ${cmd} → ${msg}`);
     const status = /^HTTP (\d{3})\b/.exec(msg)?.[1];
-    if (status) {
-      throw new Error(`服务器请求失败（HTTP ${status}），请稍后重试或在设置中切换线路`);
+    const networkish = !status && NET_FAIL.test(msg);
+    notifyNet({ ok: false, cmd, msg, networkish });
+    // 线路可能正被自动切走：给切换留一点时间，只读请求重试一次，用户就不用看见这条错误
+    if (networkish && READ_ONLY.has(cmd)) {
+      logLine(`[api] ${cmd} 链路异常，1.2s 后重试一次`);
+      await new Promise((r) => setTimeout(r, 1200));
+      try {
+        const r = await once();
+        logLine(`[api] ${cmd} 重试成功`);
+        notifyNet({ ok: true, cmd });
+        return r;
+      } catch (e2) {
+        const again = typeof e2 === "string" ? e2 : msg;
+        const againStatus = /^HTTP (\d{3})\b/.exec(again)?.[1];
+        logLine(`[api] ${cmd} 重试仍失败 → ${again}`);
+        throw new Error(failMessage(again, againStatus));
+      }
     }
-    throw new Error(msg.length > 140 ? `${msg.slice(0, 140)}…` : msg);
+    throw new Error(failMessage(msg, status));
   }
 }
 
@@ -102,20 +149,30 @@ export const api = {
   collect: (id: number, on: boolean) => call<unknown>("api_collect", { id, on }),
   follow: (uid: number, on: boolean) => call<unknown>("api_follow", { uid, on }),
 
-  /* 线路（数据源）：固定线路写死在 Rust 侧，镜像线路按需从地址发布页拉取 */
+  /* 线路（数据源）：固定线路写死在 Rust 侧，镜像线路从地址发布页拉、推荐镜像从发布入口页拉 */
   lineState: () => call<LineState>("line_state"),
   lineSet: (url: string) => call<string>("line_set", { url }),
   lineMirrors: () => call<LineMirrors>("line_mirrors"),
   lineProbe: (urls: string[]) => call<LineProbe[]>("line_probe", { urls }),
+  lineAuto: () => call<LineAuto>("line_auto"),
+  /* 当前是镜像时敲一次主站，通了就切回（不清会话） */
+  lineTryMain: () => call<LineTryMain>("line_try_main"),
+  /* 线路体检：探一次 /api/videos，和自动选线同一判据 */
+  lineHealth: () => call<LineHealth>("line_health"),
 
   /* 更新检查：对比 GitHub Release 的 tag */
   checkUpdate: () => call<UpdateInfo>("check_update"),
+  /* 应用内更新：下载安装包（直连失败逐个走加速源）→ 交给系统安装器 */
+  downloadUpdate: (url: string, name: string) => call<string>("download_update", { url, name }),
+  installUpdate: (path: string) => call<void>("install_update", { path }),
   openUrl: (url: string) => call<void>("open_url", { url }),
 };
 
 /* ── 更新检查 ───────────────────────────────────────────── */
 
 export type UpdateInfo = {
+  /** 当前平台对应的安装包；没有就是这次 release 没给本平台出包 */
+  asset?: { name: string; url: string } | null;
   current: string;
   latest: string;
   tag?: string;
@@ -130,8 +187,39 @@ export type UpdateInfo = {
 
 export type LineItem = { name?: string; url: string; host?: string };
 export type LineState = { base: string; default: string; fixed: LineItem[] };
-export type LineMirrors = { source: string; script?: string; items: LineItem[] };
+export type LineMirrors = { source: string; script?: string; items: LineItem[]; recommended_source?: string; recommended: LineItem[] };
 export type LineProbe = { url: string; ok: boolean; status?: number; ms: number; error?: string };
+export type LineHealth = { base: string; ok: boolean; ms: number; status: number | null };
+
+/** 自动选线：只比 `.com` 与 `.ai` 两条，取通的那条、快的那条。 */
+export type LineAutoCandidate = {
+  tier: "main" | "cn" | "mirror";
+  url: string;
+  ok: boolean;
+  reachable: boolean;
+  ms: number;
+  status: number | null;
+};
+export type LineAuto = {
+  previous: string;
+  base: string;
+  switched: boolean;
+  pick: {
+    base: string;
+    tier: "main" | "cn" | "none";
+    ms: number;
+    reason: string;
+    candidates: LineAutoCandidate[];
+  };
+};
+
+/** 回切主站的探测结果：`probe.ok` 为主站到底通不通 */
+export type LineTryMain = {
+  previous: string;
+  base: string;
+  switched: boolean;
+  probe: { ok: boolean; base: string; tier: string; ms: number; status: number | null };
+};
 
 /** `https://a.b/c` → `a.b`（线路展示用） */
 export const hostOf = (url: string) => {

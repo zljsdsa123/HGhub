@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { api, hostOf, isMobile, type LineItem, type LineProbe, type LineState } from "../api";
 import { useStore } from "../store";
 import { Modal, Sheet } from "./ui";
@@ -31,11 +31,22 @@ function Row({ item, current, probe, busy, disabled, onPick, onProbe }: {
   );
 }
 
+/* 分组头：标题 + 说明 + 右侧动作。三组共用，别再有的按钮在头、有的在尾 */
+function GroupHead({ title, hint, actions }: { title: string; hint: string; actions?: ReactNode }) {
+  return (
+    <div className="flex items-center gap-2 px-1 mt-4 mb-1.5 first:mt-1">
+      <span className="text-[10.5px] font-semibold text-dim tracking-wide shrink-0">{title}</span>
+      <span className="text-[10px] text-dim truncate min-w-0 flex-1">{hint}</span>
+      {actions && <div className="ml-auto shrink-0 flex items-center gap-2.5">{actions}</div>}
+    </div>
+  );
+}
 /* 线路选择：桌面居中弹窗，移动端底部抽屉 */
 export default function LinePicker({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { toast, setUser } = useStore();
   const [state, setState] = useState<LineState | null>(null);
   const [mirrors, setMirrors] = useState<LineItem[] | null>(null);
+  const [recommended, setRecommended] = useState<LineItem[] | null>(null);
   const [mirrorErr, setMirrorErr] = useState("");
   const [loadingMirrors, setLoadingMirrors] = useState(false);
   const [probes, setProbes] = useState<ProbeMap>({});
@@ -52,6 +63,7 @@ export default function LinePicker({ open, onClose }: { open: boolean; onClose: 
     try {
       const res = await api.lineMirrors();
       setMirrors(res?.items || []);
+      setRecommended(res?.recommended || []);
     } catch (e) {
       setMirrors([]);
       setMirrorErr((e as Error).message || "镜像线路获取失败");
@@ -93,6 +105,8 @@ export default function LinePicker({ open, onClose }: { open: boolean; onClose: 
       if (next !== state?.base) setUser(null);
       setState((s) => (s ? { ...s, base: next } : s));
       toast(`线路已切换到 ${hostOf(next)}，跨站点需重新登录`, "ok");
+      // 走的是新域名了，列表页得重新拉一遍，否则还是旧线路的内容
+      window.dispatchEvent(new Event("hg:line-changed"));
     } catch (e) {
       toast((e as Error).message || "切换失败", "info");
     } finally {
@@ -115,14 +129,16 @@ export default function LinePicker({ open, onClose }: { open: boolean; onClose: 
       </div>
 
       <div className="flex-1 scroll-y px-3 pb-4">
-        <div className="flex items-center gap-2 px-1 mt-1 mb-1.5">
-          <span className="text-[10.5px] font-semibold text-dim tracking-wide">固定线路</span>
-          <span className="text-[10px] text-dim">需代理 / 非大陆网络</span>
-          <button onClick={() => probe(fixed, "fixed")} disabled={busyAll || !fixed.length}
-            className="ml-auto text-[10.5px] text-primary pressable disabled:opacity-50">
-            {probing === "fixed" ? "检测中…" : "全部检测"}
-          </button>
-        </div>
+        <GroupHead
+          title="固定线路"
+          hint="需代理 / 非大陆网络"
+          actions={
+            <button onClick={() => probe(fixed, "fixed")} disabled={busyAll || !fixed.length}
+              className="text-[10.5px] text-primary pressable disabled:opacity-50">
+              {probing === "fixed" ? "检测中…" : "全部检测"}
+            </button>
+          }
+        />
         <div className="rounded-(--r-md) bg-s2 divide-y divide-s3 overflow-hidden">
           {fixed.map((it) => (
             <Row key={it.url} item={it} current={state?.base === it.url} probe={probes[it.url]}
@@ -131,14 +147,47 @@ export default function LinePicker({ open, onClose }: { open: boolean; onClose: 
           {!fixed.length && <div className="px-3.5 py-3 text-[11px] text-mut">读取中…</div>}
         </div>
 
-        <div className="flex items-center gap-2 px-1 mt-4 mb-1.5">
-          <span className="text-[10.5px] font-semibold text-dim tracking-wide">镜像线路</span>
-          <span className="text-[10px] text-dim">一般可直连 · 仅游客浏览</span>
-          <button onClick={() => { void readMirrors(); }} disabled={loadingMirrors}
-            className="ml-auto inline-flex items-center gap-1 text-[10.5px] text-primary pressable disabled:opacity-50">
-            <IRefresh size={12} />{loadingMirrors ? "获取中…" : "刷新"}
-          </button>
+        <GroupHead
+          title="推荐镜像"
+          hint="发布页每次换一批 · 当前线路置顶"
+          actions={
+            recommended?.length ? (
+              <button onClick={() => probe(recommended, "recommended")} disabled={busyAll}
+                className="text-[10.5px] text-primary pressable disabled:opacity-50">
+                {probing === "recommended" ? "检测中…" : `全部检测（${recommended.length}）`}
+              </button>
+            ) : undefined
+          }
+        />
+        <div className="rounded-(--r-md) bg-s2 divide-y divide-s3 overflow-hidden">
+          {loadingMirrors && <div className="flex justify-center py-6"><div className="w-6 h-6 spinner" /></div>}
+          {!loadingMirrors && !recommended?.length && (
+            <div className="px-3.5 py-3 text-[11px] text-mut">推荐页里没有可用的镜像地址</div>
+          )}
+          {!loadingMirrors && (recommended || []).map((it) => (
+            <Row key={it.url} item={it} current={state?.base === it.url} probe={probes[it.url]}
+              busy={probing === it.url} disabled={busyAll} onPick={pick} onProbe={(u) => probe([{ url: u }], u)} />
+          ))}
         </div>
+
+        <GroupHead
+          title="镜像线路"
+          hint="一般可直连"
+          actions={
+            <>
+              <button onClick={() => { void readMirrors(); }} disabled={loadingMirrors}
+                className="inline-flex items-center gap-1 text-[10.5px] text-primary pressable disabled:opacity-50">
+                <IRefresh size={12} />{loadingMirrors ? "获取中…" : "刷新"}
+              </button>
+              {!!mirrors?.length && (
+                <button onClick={() => probe(mirrors, "mirrors")} disabled={busyAll}
+                  className="text-[10.5px] text-primary pressable disabled:opacity-50">
+                  {probing === "mirrors" ? "检测中…" : `全部检测（${mirrors.length}）`}
+                </button>
+              )}
+            </>
+          }
+        />
         <div className="rounded-(--r-md) bg-s2 divide-y divide-s3 overflow-hidden">
           {loadingMirrors && <div className="flex justify-center py-6"><div className="w-6 h-6 spinner" /></div>}
           {!loadingMirrors && mirrorErr && (
@@ -155,17 +204,10 @@ export default function LinePicker({ open, onClose }: { open: boolean; onClose: 
               busy={probing === it.url} disabled={busyAll} onPick={pick} onProbe={(u) => probe([{ url: u }], u)} />
           ))}
         </div>
-        {!loadingMirrors && !!mirrors?.length && (
-          <div className="flex justify-end px-1 mt-2">
-            <button onClick={() => probe(mirrors, "mirrors")} disabled={busyAll}
-              className="text-[10.5px] text-primary pressable disabled:opacity-50">
-              {probing === "mirrors" ? "检测中…" : `全部检测（${mirrors.length}）`}
-            </button>
-          </div>
-        )}
 
         <div className="text-[10px] text-dim leading-relaxed px-1 mt-4">
-          切换后立即生效，请求链路与数据模型不变。不做自动检测 / 自动切换，只有点「检测」时才探测一次。
+          切换后立即生效，请求链路与数据模型不变。这里的「检测」只探这一次；
+          日常的自动选线在 设置 → 网络 → 自动选择线路。
         </div>
       </div>
     </div>

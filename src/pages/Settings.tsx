@@ -3,20 +3,24 @@ import { api, APP_VERSION, hostOf, logLine, platform, type UpdateInfo } from "..
 import { useStore } from "../store";
 import { Modal, Toggle } from "../components/ui";
 import LinePicker from "../components/LinePicker";
+import { autoLineEnabled, pickLine, setAutoLine } from "../autoLine";
 import { copyPlaybackLog, initPlaybackLog, setPlaybackLog, usePlaybackLog } from "../playbackDiagnostics";
-import { IBack, IBoltF, IBroom, IChevR, IHeart, IInfo, ILink, ILockF, IMoon, IRefresh, ISettings, ISun, IVolMute } from "../icons";
+import { IBack, IBoltF, IBroom, IChevR, IHeart, IInfo, ILink, ILockF, IMoon, IRefresh, ISettings, ISun, IVolMute, IList } from "../icons";
 
 /* 独立设置页：线路 / 外观 / 播放 / 本地数据 / 清理缓存 / 网络诊断 / 关于
    入口：Windows 侧栏「设置」、Android「我的」右上角齿轮 */
 export default function Settings({ onBack, wide }: { onBack: () => void; wide: boolean }) {
-  const { theme, setTheme, favs, history, muteOnStartup, setMuteOnStartup, strictSecurity, strictSecurityReady, securityPending, cliRelaxed, setStrictSecurity, toast } = useStore();
+  const { theme, setTheme, favs, history, muteOnStartup, setMuteOnStartup, swipeEp, setSwipeEp, strictSecurity, strictSecurityReady, securityPending, cliRelaxed, setStrictSecurity, toast } = useStore();
   const [about, setAbout] = useState(false);
   const [clearOpen, setClearOpen] = useState(false);
   const [clearing, setClearing] = useState(false);
   const [lineOpen, setLineOpen] = useState(false);
   const [lineBase, setLineBase] = useState("");
+  const [autoLineOn, setAutoLineOn] = useState(autoLineEnabled());
   const [checking, setChecking] = useState(false);
   const [update, setUpdate] = useState<UpdateInfo | null>(null);
+  /** 应用内更新进行到哪一步（空串=没在更新） */
+  const [updating, setUpdating] = useState("");
   const playbackLog = usePlaybackLog();
   const [copyingLog, setCopyingLog] = useState(false);
 
@@ -36,6 +40,29 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
       toast((e as Error).message || "检查更新失败", "info");
     } finally {
       setChecking(false);
+    }
+  };
+  /** 应用内更新：下载安装包 → 交给系统安装器。
+   *
+   * 加速源在后端处理（直连 GitHub 拉不动时自动换），前端只等结果。
+   */
+  const doUpdate = async () => {
+    if (!update) return;
+    if (!update.asset) {
+      api.openUrl(update.url).catch(() => {});
+      return;
+    }
+    setUpdating("下载中…");
+    try {
+      const path = await api.downloadUpdate(update.asset.url, update.asset.name);
+      setUpdating("调起安装器…");
+      await api.installUpdate(path);
+      setUpdate(null);
+      toast("下载完成，按系统提示安装即可", "ok");
+    } catch (e) {
+      toast((e as Error).message || "更新失败", "info");
+    } finally {
+      setUpdating("");
     }
   };
 
@@ -86,6 +113,14 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
               </div>
               <Toggle on={muteOnStartup} onChange={setMuteOnStartup} label="启动时静音" />
             </div>
+            <div className="flex items-center gap-3 px-3.5 py-3">
+              <span className="w-8 h-8 rounded-full bg-s3 flex items-center justify-center text-primary"><IList size={16} /></span>
+              <div className="flex-1 min-w-0">
+                <div className="text-[12.5px] text-on">上下划切集</div>
+                <div className="text-[10.5px] text-mut">多集短剧上下滑换集，划到头再换下一部</div>
+              </div>
+              <Toggle on={swipeEp} onChange={setSwipeEp} label="上下划切集" />
+            </div>
           </Section>
 
           <Section title="本地数据">
@@ -115,6 +150,21 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
               </div>
               <IChevR size={15} className="text-mut" />
             </button>
+            <div className="flex items-center gap-3 px-3.5 py-3">
+              <span className="w-8 h-8 rounded-full bg-s3 flex items-center justify-center text-primary"><IRefresh size={15} /></span>
+              <div className="flex-1 min-w-0">
+                <div className="text-[12.5px] text-on">自动选择线路</div>
+              </div>
+              <Toggle
+                on={autoLineOn}
+                onChange={(on) => {
+                  setAutoLine(on);
+                  setAutoLineOn(on);
+                  toast(on ? "已开启：线路跟着网络自动选" : "已关闭：改用手动选线");
+                  if (on) void pickLine("manual", true).then(readLine);
+                }}
+              />
+            </div>
             <div className="flex items-center gap-3 px-3.5 py-3">
               <span className="w-8 h-8 rounded-full bg-s3 flex items-center justify-center text-primary"><ILockF size={15} /></span>
               <div className="flex-1 min-w-0">
@@ -161,7 +211,7 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
               <span className="w-8 h-8 rounded-full bg-s3 flex items-center justify-center text-primary"><IInfo size={16} /></span>
               <div className="flex-1 min-w-0">
                 <div className="text-[12.5px] text-on">播放诊断日志</div>
-                <div className="text-[10.5px] text-mut">记录点击、拖动、切页和缓冲过程；复现问题后可关闭并复制日志</div>
+                <div className="text-[10.5px] text-mut">版本、平台、当前线路和播放失败原因始终记录；开关只额外记录拖动与缓冲细节</div>
                 {playbackLog.error && <div role="alert" className="text-[10.5px] text-danger">{playbackLog.error}</div>}
               </div>
               <Toggle label="播放诊断日志" on={playbackLog.enabled} disabled={!playbackLog.ready || playbackLog.pending}
@@ -176,7 +226,7 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
               <span className="w-8 h-8 rounded-full bg-s3 flex items-center justify-center text-primary"><ILink size={16} /></span>
               <div className="flex-1 min-w-0">
                 <div className="text-[12.5px] text-on">{copyingLog ? "正在复制…" : "复制播放诊断日志"}</div>
-                <div className="text-[10.5px] text-mut break-all">{playbackLog.path || "日志仅保存在本机"}</div>
+                <div className="text-[10.5px] text-mut break-all">含版本、平台、当前线路、播放失败原因，粘贴即完整{playbackLog.path ? ` · ${playbackLog.path}` : ""}</div>
               </div>
               <IChevR size={15} className="text-mut" />
             </button>
@@ -201,7 +251,7 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
             </button>
           </Section>
 
-          <div className="text-center text-[10px] text-dim mt-5">HGhub {APP_VERSION} · {platform === "android" ? "Android" : platform === "ios" ? "iOS" : platform === "macos" ? "macOS" : "Windows"} 客户端</div>
+          <div className="text-center text-[10px] text-dim mt-5">HGhub {APP_VERSION} · {platform === "android" ? "Android" : platform === "ios" ? "iOS" : platform === "macos" ? "macOS" : platform === "linux" ? "Linux" : "Windows"} 客户端</div>
         </div>
       </div>
 
@@ -283,14 +333,21 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
             <div className="mt-3 max-h-[180px] scroll-y rounded-(--r-sm) bg-s2 p-3 text-[11px] text-mut whitespace-pre-wrap leading-relaxed">{update.notes}</div>
           )}
           <div className="flex gap-2 mt-4">
-            <button onClick={() => setUpdate(null)} className="flex-1 h-9 rounded-(--r-ctl) bg-s3 text-[12.5px] text-on/80 pressable">稍后</button>
+            <button onClick={() => setUpdate(null)} disabled={!!updating}
+              className="flex-1 h-9 rounded-(--r-ctl) bg-s3 text-[12.5px] text-on/80 pressable disabled:opacity-60">稍后</button>
+            <button onClick={() => void doUpdate()} disabled={!!updating}
+              className="flex-1 h-9 rounded-(--r-ctl) bg-primary text-[12.5px] font-semibold text-on-primary pressable disabled:opacity-60">
+              {updating || (update?.asset ? "立即更新" : "前往下载")}
+            </button>
+          </div>
+          {!!update?.asset && (
             <button onClick={() => {
               if (!update) return;
               api.openUrl(update.url).catch(() => {
                 navigator.clipboard?.writeText(update.url).then(() => toast("下载地址已复制", "ok")).catch(() => {});
               });
-            }} className="flex-1 h-9 rounded-(--r-ctl) bg-primary text-[12.5px] font-semibold text-on-primary pressable">前往下载</button>
-          </div>
+            }} className="w-full h-9 mt-2 rounded-(--r-ctl) bg-s3 text-[12px] text-on/80 pressable">浏览器打开</button>
+          )}
           <div className="text-[10px] text-dim mt-2.5 break-all">{update?.url}</div>
         </div>
       </Modal>

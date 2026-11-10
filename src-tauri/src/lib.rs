@@ -1,5 +1,7 @@
 mod api;
 mod lines;
+#[cfg(target_os = "linux")]
+mod linux_http;
 mod logging;
 #[cfg(target_os = "macos")]
 mod macos_titlebar;
@@ -61,6 +63,10 @@ pub fn run() {
                 let state: tauri::State<Api> = app.state();
                 state.session.bind(dir);
             }
+            // Linux 的 <video> 由 GStreamer 播放，它只认常规 HTTP scheme；
+            // 这里起一个 loopback 代理，前端与 m3u8 改写都指向它（见 linux_http.rs）
+            #[cfg(target_os = "linux")]
+            linux_http::start();
             // macOS 主窗口在此创建：先按系统红绿灯尺寸算出居中位置（见 macos_titlebar.rs）
             #[cfg(target_os = "macos")]
             macos_titlebar::create_main_window(app)?;
@@ -69,7 +75,11 @@ pub fn run() {
         .plugin(
             tauri::plugin::Builder::<_, ()>::new("navigation-guard")
                 .on_navigation(|_webview, url| {
-                    (url.scheme() == "tauri" && url.host_str() == Some("localhost"))
+                    let host = url.host_str().unwrap_or("");
+                    (url.scheme() == "tauri" && host == "localhost")
+                        // Android 上自定义协议表现为 http://<scheme>.localhost，WebView 有时把它
+                        // 当成一次导航进来。这是进程内的媒体代理地址，不出网，严格模式也不该拦。
+                        || (matches!(url.scheme(), "http" | "https") && host.ends_with(".localhost"))
                         || allowed_frontend_origin(&url.origin().ascii_serialization())
                         || (!network_policy::strict_security()
                             && matches!(url.scheme(), "http" | "https"))
@@ -92,11 +102,16 @@ pub fn run() {
                 let origin_kind = match request_origin.as_deref() { None => "missing", Some("null") => "null", Some(origin) if allowed_frontend_origin(origin) => "app", _ => "other" };
                 playback_log::record("protocol.request", serde_json::json!({"resource": resource, "route": route, "method": request.method().as_str(), "range": range, "origin_kind": origin_kind}));
             }
-            if network_policy::strict_security()
-                && request_origin
-                    .as_deref()
-                    .is_some_and(|origin| !allowed_frontend_origin(origin))
-            {
+            // 部分 Android WebView 在拦截 http://<scheme>.localhost 时给不出 Origin（或给空串），
+            // 严格模式下会被误判成外部来源直接 403 —— 这就是「接口通了、m3u8 却立刻 networkError」。
+            // 这条通道只通向 media::handle 的 /img /hls /seg，后端仍按严格模式做 SSRF 校验，
+            // 所以缺 Origin 放行不等于开了个开放代理。
+            let origin_ok = match request_origin.as_deref() {
+                // WebView 拦截自定义协议时可能是 None、空串，甚至字面量 "null"（sandbox 语义）
+                None | Some("") | Some("null") => true,
+                Some(origin) => allowed_frontend_origin(origin),
+            };
+            if network_policy::strict_security() && !origin_ok {
                 playback_log::record("security.origin_denied", serde_json::json!({"origin_null": request_origin.as_deref() == Some("null")}));
                 responder.respond(
                     tauri::http::Response::builder()
@@ -138,7 +153,12 @@ pub fn run() {
             api::line_set,
             api::line_mirrors,
             api::line_probe,
+            api::line_auto,
+            api::line_try_main,
+            api::line_health,
             api::check_update,
+            api::download_update,
+            api::install_update,
             api::open_url,
             api::api_login,
             api::api_register,

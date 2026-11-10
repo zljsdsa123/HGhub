@@ -1,7 +1,8 @@
 import { useEffect, useImperativeHandle, useRef, forwardRef, useState } from "react";
 import Hls from "hls.js";
 import { isLocalMedia, playlist } from "../api";
-import { mediaResource, observeHls, usePlayerDiagnostics } from "../playbackDiagnostics";
+import { mediaErrorMessage } from "../mediaErrors";
+import { mediaHost, mediaResource, observeHls, usePlayerDiagnostics } from "../playbackDiagnostics";
 import { usePlaybackActivity } from "../usePlaybackActivity";
 
 export type VideoHandle = {
@@ -85,7 +86,7 @@ const VideoSurface = forwardRef<VideoHandle, Props>(function VideoSurface(
     const proxied = isLocalMedia(src);
     const url = proxied ? src : playlist(src);
     const useHls = !url.includes("/seg?u=");
-    trace("source.load", { engine: useHls && Hls.isSupported() ? "hls.js" : "native", auto_play: autoPlay, resource: mediaResource(src) });
+    trace("source.load", { engine: useHls && Hls.isSupported() ? "hls.js" : "native", auto_play: autoPlay, resource: mediaResource(src), host: mediaHost(src) });
 
     /* 换源时先把音量/倍速套回去：hls 重新 attach 后浏览器会把它们重置成默认值 */
     const applySettings = () => {
@@ -151,6 +152,11 @@ const VideoSurface = forwardRef<VideoHandle, Props>(function VideoSurface(
     v.playbackRate = rate;
   };
 
+  const handleVideoError = () => {
+    if (hlsRef.current) return;
+    onError?.(mediaErrorMessage(videoRef.current?.error ?? null));
+  };
+
   return (
     <video
       ref={videoRef}
@@ -174,6 +180,7 @@ const VideoSurface = forwardRef<VideoHandle, Props>(function VideoSurface(
       onWaiting={() => onWaiting?.()}
       onPlaying={() => { if (activity.isActive()) onPlaying?.(); }}
       onEnded={() => { if (activity.isActive()) onEnded?.(); }}
+      onError={handleVideoError}
     />
   );
 });

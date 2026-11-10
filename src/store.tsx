@@ -3,7 +3,7 @@ import { api, platform as envPlatform } from "./api";
 import { isStrictSecurity, setStrictSecurity as setHtmlStrictSecurity } from "./html";
 import type { User } from "./types";
 
-export type Platform = "android" | "ios" | "windows" | "macos";
+export type Platform = "android" | "ios" | "windows" | "macos" | "linux";
 export type Theme = "dark" | "light";
 export type Tab = "home" | "search" | "category" | "profile";
 
@@ -37,7 +37,13 @@ export type PageInput =
   | { kind: "posts" }
   | { kind: "post"; id: number };
 
-export type Toast = { id: number; msg: string; icon?: "ok" | "heart" | "star" | "info" };
+export type Toast = {
+  id: number;
+  msg: string;
+  icon?: "ok" | "heart" | "star" | "info";
+  /** 线路切换专用的结构化内容，有这个就不看 msg */
+  line?: { region: "cn" | "intl"; host: string; ms: number };
+};
 
 /** 观看记录：看到第几集、第几秒（`dur` 用来判断是否已看完） */
 export type WatchProgress = { id: number; ep: number; t: number; dur: number; at: number };
@@ -51,12 +57,14 @@ type Persist = {
   muteOnStartup: boolean;
   volume: number;
   searchHist: string[];
+  /** 上下划切集：多集短剧上下滑就换集，而不是换下一部 */
+  swipeEp: boolean;
 };
 
 const LS = "hghub_app_v1";
 const DEFAULTS: Persist = {
   likes: [], favs: [], history: [], follows: [],
-  muted: true, muteOnStartup: true, volume: 0.7, searchHist: [],
+  muted: true, muteOnStartup: true, volume: 0.7, searchHist: [], swipeEp: false,
 };
 
 /** 旧版本 history 是 number[]，读出来时升级成带进度的结构 */
@@ -122,10 +130,13 @@ type Store = {
   fs: boolean; setFs: (v: boolean | ((p: boolean) => boolean)) => void;
   muted: boolean; setMuted: (v: boolean | ((p: boolean) => boolean)) => void;
   muteOnStartup: boolean; setMuteOnStartup: (on: boolean) => void;
+  swipeEp: boolean; setSwipeEp: (on: boolean) => void;
   volume: number; setVolume: (v: number) => void;
   searchHist: string[]; addSearch: (q: string) => void; clearSearchHist: () => void;
   strictSecurity: boolean; strictSecurityReady: boolean; securityPending: boolean; cliRelaxed: boolean; setStrictSecurity: (on: boolean) => Promise<void>;
   toasts: Toast[]; toast: (msg: string, icon?: Toast["icon"]) => void;
+  /** 线路切换计数：变了就让列表页重挂载，重新拉一遍数据 */
+  lineEpoch: number;
 };
 
 const Ctx = createContext<Store>(null as unknown as Store);
@@ -140,6 +151,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loginOpen, setLoginOpen] = useState(false);
   const [toasts, setToasts] = useState<Toast[]>([]);
+  const [lineEpoch, setLineEpoch] = useState(0);
   const [theater, setTheaterState] = useState(false);
   const [fs, setFsState] = useState(false);
   const [strictSecurity, setStrictSecurityState] = useState<boolean>(isStrictSecurity);
@@ -187,6 +199,28 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     const id = ++toastSeq.current;
     setToasts((t) => [...t.slice(-2), { id, msg, icon }]);
     window.setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 2200);
+  }, []);
+  /** 自动选线切换成功后由 `autoLine.ts` 派发，这里只负责显示 */
+  useEffect(() => {
+    const onLine = (e: Event) => {
+      const d = (e as CustomEvent<{ region: "cn" | "intl"; host: string; ms: number }>).detail;
+      if (!d) return;
+      const id = ++toastSeq.current;
+      setToasts((t) => [...t.slice(-2), { id, msg: "", line: d }]);
+      window.setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 3200);
+    };
+    window.addEventListener("hg:line", onLine);
+    return () => window.removeEventListener("hg:line", onLine);
+  }, []);
+  /** 线路真的换了（自动、手切都算）：
+   *
+   * 旧数据全是在上一个域名上拉的，留着等于对着一条死链路。但各列表页只在
+   * 挂载时拉一次，所以这里给一个递增的 key，让它们重挂载、重新请求。
+   */
+  useEffect(() => {
+    const bump = () => setLineEpoch((n) => n + 1);
+    window.addEventListener("hg:line-changed", bump);
+    return () => window.removeEventListener("hg:line-changed", bump);
   }, []);
 
   const setTab = useCallback((t: Tab) => { setTabRaw(t); setStack([]); }, []);
@@ -262,6 +296,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const setMuteOnStartup = useCallback((on: boolean) => {
     setP((s) => ({ ...s, muteOnStartup: on }));
   }, []);
+  const setSwipeEp = useCallback((on: boolean) => {
+    setP((s) => ({ ...s, swipeEp: on }));
+  }, []);
   const setVolume = useCallback((v: number) => {
     const volume = Math.max(0, Math.min(1, v));
     setP((s) => ({ ...s, volume, muted: volume === 0 }));
@@ -278,13 +315,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     toggleLikeLocal, toggleFavLocal, toggleFollowLocal, addHistory, clearHistory,
     muted: p.muted, setMuted, volume: p.volume, setVolume, theater, setTheater, fs, setFs,
     muteOnStartup: p.muteOnStartup, setMuteOnStartup,
+    swipeEp: p.swipeEp, setSwipeEp,
     searchHist: p.searchHist, addSearch, clearSearchHist,
     strictSecurity, strictSecurityReady, securityPending, cliRelaxed, setStrictSecurity,
-    toasts, toast,
+    toasts, toast, lineEpoch,
   }), [theme, tab, setTab, stack, push, pop, user, loginOpen, logout,
     p, toggleLikeLocal, toggleFavLocal, toggleFollowLocal, addHistory, clearHistory,
-    setMuted, setMuteOnStartup, setVolume, addSearch, clearSearchHist, strictSecurity, strictSecurityReady, securityPending, cliRelaxed, setStrictSecurity,
-    toasts, toast, theater, setTheater, fs, setFs]);
+    setMuted, setMuteOnStartup, setSwipeEp, setVolume, addSearch, clearSearchHist, strictSecurity, strictSecurityReady, securityPending, cliRelaxed, setStrictSecurity,
+    toasts, toast, lineEpoch, theater, setTheater, fs, setFs]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

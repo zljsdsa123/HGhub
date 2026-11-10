@@ -20,7 +20,10 @@ use tauri::http::{Response, StatusCode};
 /// 前端 `src/api.ts` 的 `LOCAL` 必须与此一致，否则封面与视频全部加载失败。
 #[cfg(any(target_os = "windows", target_os = "android"))]
 pub const LOCAL_ORIGIN: &str = "http://hg.localhost";
-#[cfg(not(any(target_os = "windows", target_os = "android")))]
+/// Linux 走 loopback HTTP：WebKitGTK 的播放器是 GStreamer，它拿不到自定义 scheme。
+#[cfg(target_os = "linux")]
+pub const LOCAL_ORIGIN: &str = crate::linux_http::ORIGIN;
+#[cfg(not(any(target_os = "windows", target_os = "android", target_os = "linux")))]
 pub const LOCAL_ORIGIN: &str = "hg://localhost";
 
 const IMG_KEY: &[u8] = b"f5d965df75336270";
@@ -400,7 +403,9 @@ mod tests {
         );
         let body = std::str::from_utf8(response.body()).unwrap();
         assert_eq!(body.matches(&format!("{LOCAL_ORIGIN}/seg?u=")).count(), 4);
-        assert!(!body.contains("URI=\"http://127.0.0.1"));
+        // Linux 上 LOCAL_ORIGIN 本身就是 `http://127.0.0.1:<port>`，
+        // 所以不能断言「不含 127.0.0.1」，要断言上游那条 key 地址已被代理包起来
+        assert!(!body.contains("URI=\"http://127.0.0.1/key\""));
         assert!(body.contains("https%3A%2F%2Fcdn%2Eexample%2Faudio%2Flist%2Em3u8"));
         assert_eq!(
             response.headers()["Content-Type"],

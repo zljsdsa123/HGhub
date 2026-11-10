@@ -1,10 +1,26 @@
 name: Release
 
-# 打 tag（v1.2.3）即自动出包并发布 Release；也可以在 Actions 页手动跑一次只出产物。
+# 打 tag（v1.2.3）即自动出包并发布 Release；也可以在 Actions 页手动跑：
+# platforms=all + quick=false + 填好 tag，等价于一次正式发版。
 on:
   push:
     tags: ["v*"]
+  # 手动跑：默认 quick + 单平台，验证改动用；选 all 且关掉 quick 就是发版那套全量构建。
   workflow_dispatch:
+    inputs:
+      platforms:
+        description: "构建范围：check 只查编译不出包；all 四平台；选单个只出那一个"
+        type: choice
+        default: all
+        options: [all, android-arm64, android, linux, windows, macos, ios, check]
+      quick:
+        description: "quick 编译：thin LTO + 4 个 codegen 单元，快一倍，体积大几 MB"
+        type: boolean
+        default: true
+      tag:
+        description: "发版用：填 tag（如 v1.2.4+hg.1），配合 platforms=all 构建完直接发 Release；留空则只出产物"
+        type: string
+        default: ""
 
 concurrency:
   group: release-${{ github.ref }}
@@ -18,8 +34,12 @@ jobs:
   windows:
     name: Windows (setup + portable)
     runs-on: windows-latest
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.platforms == 'all' || inputs.platforms == 'windows' }}
+    env:
+      CARGO_PROFILE_RELEASE_LTO: ${{ inputs.quick && 'thin' || 'true' }}
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: ${{ inputs.quick && '4' || '1' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: 版本号对齐 tag
         id: ver
@@ -27,21 +47,28 @@ jobs:
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             V="${GITHUB_REF_NAME#v}"
+          elif [[ -n "${{ inputs.tag }}" ]]; then
+            V="${{ inputs.tag }}"
+            V="${V#v}"
           else
             V="$(node -p "require('./src-tauri/tauri.conf.json').version")"
           fi
+          # 版本号 + Android versionCode 一起写（Tauri 自己会忽略 +hg.N 后缀）
+          node scripts/set-version.mjs "$V"
+          CODE="$(node -p "require('./src-tauri/tauri.conf.json').bundle.android.versionCode")"
           echo "version=$V" >> "$GITHUB_OUTPUT"
-          node -e "const fs=require('fs');for(const p of ['src-tauri/tauri.conf.json','package.json']){const j=JSON.parse(fs.readFileSync(p));j.version=process.argv[1];fs.writeFileSync(p,JSON.stringify(j,null,2)+'\n')}" "$V"
+          echo "versionCode=$CODE" >> "$GITHUB_OUTPUT"
+          echo "versionName=$V  versionCode=$CODE"
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: 10
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
-      - uses: swatinem/rust-cache@v2
+      - uses: swatinem/rust-cache@v2.9.3
         with:
           workspaces: src-tauri -> target
 
@@ -65,7 +92,7 @@ jobs:
           Remove-Item "artifacts/HGhub.exe"
           Get-ChildItem artifacts | Select-Object Name, Length
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: windows
           path: artifacts/*
@@ -75,8 +102,12 @@ jobs:
   android:
     name: Android (split per ABI)
     runs-on: ubuntu-latest
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.platforms == 'all' || startsWith(inputs.platforms, 'android') }}
+    env:
+      CARGO_PROFILE_RELEASE_LTO: ${{ inputs.quick && 'thin' || 'true' }}
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: ${{ inputs.quick && '4' || '1' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: 版本号对齐 tag
         id: ver
@@ -84,21 +115,28 @@ jobs:
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             V="${GITHUB_REF_NAME#v}"
+          elif [[ -n "${{ inputs.tag }}" ]]; then
+            V="${{ inputs.tag }}"
+            V="${V#v}"
           else
             V="$(node -p "require('./src-tauri/tauri.conf.json').version")"
           fi
+          # 版本号 + Android versionCode 一起写（Tauri 自己会忽略 +hg.N 后缀）
+          node scripts/set-version.mjs "$V"
+          CODE="$(node -p "require('./src-tauri/tauri.conf.json').bundle.android.versionCode")"
           echo "version=$V" >> "$GITHUB_OUTPUT"
-          node -e "const fs=require('fs');for(const p of ['src-tauri/tauri.conf.json','package.json']){const j=JSON.parse(fs.readFileSync(p));j.version=process.argv[1];fs.writeFileSync(p,JSON.stringify(j,null,2)+'\n')}" "$V"
+          echo "versionCode=$CODE" >> "$GITHUB_OUTPUT"
+          echo "versionName=$V  versionCode=$CODE"
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: 10
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "17"
@@ -118,7 +156,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
-      - uses: swatinem/rust-cache@v2
+      - uses: swatinem/rust-cache@v2.9.3
         with:
           workspaces: src-tauri -> target
           key: android
@@ -129,7 +167,15 @@ jobs:
         run: pnpm tauri android init --ci
 
       - name: 编译 APK（按 ABI 分包）
-        run: pnpm tauri android build --apk --split-per-abi --target aarch64 armv7 x86_64
+        run: |
+          # quick / android-arm64 只出 arm64：真机验证用不到 v7a 和 x86_64，省三分之二时间
+          if [ "${{ inputs.quick }}" = "true" ] || [ "${{ inputs.platforms }}" = "android-arm64" ]; then
+            TARGETS="aarch64"
+          else
+            TARGETS="aarch64 armv7 x86_64"
+          fi
+          echo "targets: $TARGETS"
+          pnpm tauri android build --apk --split-per-abi --target $TARGETS
 
       - name: 签名 APK
         env:
@@ -162,9 +208,12 @@ jobs:
           done
           rm -f "$KS"
           if [ "$found" -eq 0 ]; then echo "::error::没有找到 release APK"; exit 1; fi
+          # 打一下实际写进 APK 的 versionCode，升级链对不对看这行
+          AAPT2="$(ls "$ANDROID_SDK_ROOT"/build-tools/*/aapt2 | sort -V | tail -1)"
+          for a in artifacts/*.apk; do "$AAPT2" dump badging "$a" | grep -m1 "^package:"; done
           ls -lh artifacts
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: android
           path: artifacts/*
@@ -174,8 +223,12 @@ jobs:
   macos:
     name: macOS (universal dmg)
     runs-on: macos-latest
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.platforms == 'all' || inputs.platforms == 'macos' }}
+    env:
+      CARGO_PROFILE_RELEASE_LTO: ${{ inputs.quick && 'thin' || 'true' }}
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: ${{ inputs.quick && '4' || '1' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: 版本号对齐 tag
         id: ver
@@ -183,23 +236,30 @@ jobs:
         run: |
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             V="${GITHUB_REF_NAME#v}"
+          elif [[ -n "${{ inputs.tag }}" ]]; then
+            V="${{ inputs.tag }}"
+            V="${V#v}"
           else
             V="$(node -p "require('./src-tauri/tauri.conf.json').version")"
           fi
+          # 版本号 + Android versionCode 一起写（Tauri 自己会忽略 +hg.N 后缀）
+          node scripts/set-version.mjs "$V"
+          CODE="$(node -p "require('./src-tauri/tauri.conf.json').bundle.android.versionCode")"
           echo "version=$V" >> "$GITHUB_OUTPUT"
-          node -e "const fs=require('fs');for(const p of ['src-tauri/tauri.conf.json','package.json']){const j=JSON.parse(fs.readFileSync(p));j.version=process.argv[1];fs.writeFileSync(p,JSON.stringify(j,null,2)+'\n')}" "$V"
+          echo "versionCode=$CODE" >> "$GITHUB_OUTPUT"
+          echo "versionName=$V  versionCode=$CODE"
 
-      - uses: pnpm/action-setup@v4
+      - uses: pnpm/action-setup@v6
         with:
           version: 10
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
-      - uses: swatinem/rust-cache@v2
+      - uses: swatinem/rust-cache@v2.9.3
         with:
           workspaces: src-tauri -> target
           key: macos
@@ -208,33 +268,253 @@ jobs:
 
       # 打包目标（app + dmg）取自 src-tauri/tauri.macos.conf.json；未配置开发者证书，产物为 ad-hoc 签名
       - name: 构建（Universal dmg）
-        run: pnpm tauri build --target universal-apple-darwin
+        run: |
+          # quick 只编 arm64：universal 要交叉编两遍，时间翻倍
+          if [ "${{ inputs.quick }}" = "true" ]; then
+            pnpm tauri build --target aarch64-apple-darwin
+          else
+            pnpm tauri build --target universal-apple-darwin
+          fi
 
       - name: 收集产物
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p artifacts
-          cp src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg \
-             "artifacts/HGhub_${{ steps.ver.outputs.version }}_universal.dmg"
+          DIR=universal-apple-darwin
+          SUFFIX=universal
+          if [ "${{ inputs.quick }}" = "true" ]; then DIR=aarch64-apple-darwin; SUFFIX=arm64; fi
+          cp "src-tauri/target/$DIR/release/bundle/dmg/"*.dmg \
+             "artifacts/HGhub_${{ steps.ver.outputs.version }}_${SUFFIX}.dmg"
           ls -lh artifacts
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: macos
           path: artifacts/*
           if-no-files-found: error
 
+  ios:
+    name: iOS (unsigned ipa)
+    runs-on: macos-latest
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.platforms == 'all' || inputs.platforms == 'ios' }}
+    env:
+      CARGO_PROFILE_RELEASE_LTO: ${{ inputs.quick && 'thin' || 'true' }}
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: ${{ inputs.quick && '4' || '1' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 版本号对齐 tag
+        id: ver
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            V="${GITHUB_REF_NAME#v}"
+          elif [[ -n "${{ inputs.tag }}" ]]; then
+            V="${{ inputs.tag }}"
+            V="${V#v}"
+          else
+            V="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          fi
+          node scripts/set-version.mjs "$V"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "versionName=$V"
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+      - uses: swatinem/rust-cache@v2.9.3
+        with:
+          workspaces: src-tauri -> target
+          key: ios
+      - run: pnpm install --frozen-lockfile
+
+      - name: 生成 iOS 工程
+        run: pnpm tauri ios init --ci
+
+      - name: 认工程名和 scheme
+        id: proj
+        shell: bash
+        run: |
+          ls -la src-tauri/gen/apple
+          cd src-tauri/gen/apple
+          P="$(ls -d *.xcodeproj | head -1)"
+          S="$(xcodebuild -list -project "$P" 2>/dev/null | awk '/Schemes:/{f=1;next} f&&NF{print $1;exit}')"
+          echo "xcodeproj=$P" >> "$GITHUB_OUTPUT"
+          echo "scheme=$S" >> "$GITHUB_OUTPUT"
+          echo "project=$P scheme=$S"
+
+      - name: 构建（无签名 archive）
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd src-tauri/gen/apple
+          xcodebuild -project "${{ steps.proj.outputs.xcodeproj }}" \
+            -scheme "${{ steps.proj.outputs.scheme }}" \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/HGhub.xcarchive" \
+            archive \
+            CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
+            2>&1 | tee "$RUNNER_TEMP/xcodebuild.log" | tail -50
+
+      - name: 打包 ipa
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_DIR="$RUNNER_TEMP/HGhub.xcarchive/Products/Applications"
+          ls -la "$APP_DIR"
+          APP="$(ls -d "$APP_DIR"/*.app | head -1)"
+          mkdir -p artifacts "$RUNNER_TEMP/Payload"
+          cp -R "$APP" "$RUNNER_TEMP/Payload/"
+          cd "$RUNNER_TEMP"
+          /usr/bin/zip -qry "$GITHUB_WORKSPACE/artifacts/HGhub_${{ steps.ver.outputs.version }}_ios.ipa" Payload
+          cd "$GITHUB_WORKSPACE"
+          unzip -l "artifacts/HGhub_${{ steps.ver.outputs.version }}_ios.ipa" | head -8
+          ls -lh artifacts
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ios
+          path: artifacts/*
+          if-no-files-found: error
+
+  # ================= Linux：deb =================
+  linux:
+    name: Linux (deb)
+    runs-on: ubuntu-22.04
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.platforms == 'all' || inputs.platforms == 'linux' }}
+    env:
+      CARGO_PROFILE_RELEASE_LTO: ${{ inputs.quick && 'thin' || 'true' }}
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: ${{ inputs.quick && '4' || '1' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 版本号对齐 tag
+        id: ver
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            V="${GITHUB_REF_NAME#v}"
+          elif [[ -n "${{ inputs.tag }}" ]]; then
+            V="${{ inputs.tag }}"
+            V="${V#v}"
+          else
+            V="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          fi
+          # 版本号 + Android versionCode 一起写（Tauri 自己会忽略 +hg.N 后缀）
+          node scripts/set-version.mjs "$V"
+          CODE="$(node -p "require('./src-tauri/tauri.conf.json').bundle.android.versionCode")"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "versionCode=$CODE" >> "$GITHUB_OUTPUT"
+          echo "versionName=$V  versionCode=$CODE"
+
+      # Tauri 2 在 Linux 上依赖 webkit2gtk-4.1；22.04 的 jammy-updates 已提供
+      - name: 安装系统依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev patchelf build-essential curl wget file libssl-dev libxdo-dev
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2.9.3
+        with:
+          workspaces: src-tauri -> target
+          key: linux
+
+      - run: pnpm install --frozen-lockfile
+
+      # 打包目标取自 src-tauri/tauri.linux.conf.json
+      - name: 构建（deb）
+        run: pnpm tauri build
+
+      - name: 收集产物
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          cp src-tauri/target/release/bundle/deb/*.deb "artifacts/HGhub_${{ steps.ver.outputs.version }}_amd64.deb"
+          ls -lh artifacts
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux
+          path: artifacts/*
+          if-no-files-found: error
+
+  # ================= 只查编译：不出包，最快拿到「过 / 不过」 =================
+  check:
+    name: 编译检查（tsc + cargo check + 单测）
+    runs-on: ubuntu-22.04
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.platforms == 'check' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 版本号对齐
+        run: |
+          V="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          node scripts/set-version.mjs "$V"
+
+      - name: 安装系统依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev patchelf build-essential curl wget file libssl-dev libxdo-dev
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2.9.3
+        with:
+          workspaces: src-tauri -> target
+          key: check
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: 前端类型检查
+        run: npx tsc --noEmit -p tsconfig.json
+
+      - name: cargo check（含测试目标）
+        working-directory: src-tauri
+        run: cargo check --all-targets
+
+      - name: 单元测试
+        working-directory: src-tauri
+        run: cargo test --lib
+
   # ================= 发布 =================
   release:
     name: Publish GitHub Release
-    needs: [windows, android, macos]
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, android, macos, linux, ios]
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') ||
+      (github.event_name == 'workflow_dispatch' && inputs.tag != '')
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
@@ -242,8 +522,10 @@ jobs:
       - name: 列出待发布文件
         run: ls -lh artifacts
 
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
+          tag_name: ${{ inputs.tag != '' && inputs.tag || github.ref_name }}
+          name: ${{ inputs.tag != '' && inputs.tag || github.ref_name }}
           files: artifacts/*
           generate_release_notes: true
           fail_on_unmatched_files: true

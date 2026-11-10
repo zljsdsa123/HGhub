@@ -58,9 +58,14 @@ pub fn normalize_base(raw: &str) -> Option<String> {
     Some(parsed.origin().ascii_serialization())
 }
 
-/// 远端发布页只提供游客镜像，不能扩展账号密码的信任范围。
+/// 哪些 origin 允许携带凭据：两个固定入口，加上发布页推荐过、且当前可能作为线路的镜像。
+///
+/// 国内网络连不上 `.com`，只能用镜像；镜像和主站是同一后端、同一个账号体系。
+/// 只认发布页真的给过的地址（见 [`crate::lines::is_trusted_mirror`]），
+/// 用户手填的任意域名依旧会被严格模式拦下。
 pub fn trusted_auth_origin(origin: &str) -> bool {
     matches!(origin, "https://huangguoai.com" | "https://huangguoai.ai")
+        || crate::lines::is_trusted_mirror(origin)
 }
 
 /// 启动时读回上次选择的线路（文件不存在 / 内容坏了就保持默认）。
@@ -74,6 +79,7 @@ pub fn bind_base(dir: &std::path::Path) {
                 .and_then(|x| x.as_str())
                 .and_then(normalize_base)
             {
+                crate::lines::remember_line(&next);
                 if let Ok(mut cur) = BASE.write() {
                     *cur = next;
                 }
@@ -90,6 +96,7 @@ pub fn set_base(url: &str) -> Result<String, String> {
     let next = normalize_base(url)
         .ok_or_else(|| "线路地址无效（需要纯 HTTPS 站点地址，禁止内网）".to_string())?;
     let previous = base();
+    crate::lines::remember_line(&next);
     if let Ok(mut cur) = BASE.write() {
         *cur = next.clone();
     }

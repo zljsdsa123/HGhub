@@ -88,6 +88,23 @@ export function mediaResource(raw: string) {
   return `r${hash.toString(16).padStart(8, "0")}`;
 }
 
+/**
+ * 只取 host，用来判断「是哪条 CDN / 哪个接口域名」。
+ * 不含 path 与 query，所以能落盘：出问题时一眼看出是源站、还是某个分片域名挂了。
+ */
+export function mediaHost(raw: string): string {
+  try {
+    const url = new URL(raw);
+    if (url.protocol === "hg:" || url.hostname === "hg.localhost") {
+      const inner = url.searchParams.get("u");
+      if (inner) return new URL(inner).host;
+    }
+    return url.host;
+  } catch {
+    return "?";
+  }
+}
+
 function ranges(value: TimeRanges) {
   return Array.from({ length: Math.min(value.length, 12) }, (_, i) => [round(value.start(i)), round(value.end(i))]);
 }
@@ -206,13 +223,13 @@ export function observeHls(hls: Hls, trace: (event: string, data?: Data) => void
       if (!playbackLogEnabled()) return;
       const { frag } = data;
       const loading = frag.stats.loading;
-      trace(event, { resource: mediaResource(frag.url), fragment: frag.sn, start: round(frag.start), duration: round(frag.duration), bytes: frag.stats.loaded,
+      trace(event, { resource: mediaResource(frag.url), host: mediaHost(frag.url), fragment: frag.sn, start: round(frag.start), duration: round(frag.duration), bytes: frag.stats.loaded,
         load_ms: loading.end > 0 && loading.end >= loading.start ? round(loading.end - loading.start) : null,
         first_byte_ms: loading.first > 0 && loading.first >= loading.start ? round(loading.first - loading.start) : null });
     });
   }
   hls.on(Hls.Events.ERROR, (_event, data) => trace("hls.error", { type: data.type, detail: data.details, fatal: data.fatal, status: data.response?.code,
-    fragment: data.frag?.sn, resource: data.frag ? mediaResource(data.frag.url) : undefined }));
+    fragment: data.frag?.sn, resource: data.frag ? mediaResource(data.frag.url) : undefined, host: data.frag ? mediaHost(data.frag.url) : undefined }));
 }
 
 export function installPlaybackPageEvents() {

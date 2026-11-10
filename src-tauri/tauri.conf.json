@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "HGhub",
-  "version": "1.2.0",
-  "identifier": "com.zltest.hghub",
+  "version": "1.2.4+hg.1",
+  "identifier": "com.zltest.hghub"
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
@@ -42,7 +42,8 @@
       "icons/icon.ico"
     ],
     "android": {
-      "minSdkVersion": 24
+      "minSdkVersion": 24,
+      "versionCode": 1002004
     }
   }
 }
