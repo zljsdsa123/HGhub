@@ -1,15 +1,17 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, cover, fmt, isMobile } from "../api";
-import type { Post } from "../types";
+import type { Post, PostCategory } from "../types";
 import { useStore } from "../store";
 import { Empty, Img } from "../components/ui";
 import Player from "../components/Player";
-import { IBack, IFireF, IPlayF } from "../icons";
+import { IBack, IFireF, IPlayF, ISearch } from "../icons";
 import { handleArticleClick, sanitizeHtml } from "../html";
 
 /* ================= 吃瓜列表 ================= */
 export function PostsPage({ onBack, wide }: { onBack: () => void; wide: boolean }) {
-  const { push } = useStore();
+  const { push, pop, setTab } = useStore();
+  const [cats, setCats] = useState<PostCategory[]>([]);
+  const [cat, setCat] = useState<string>(""); // 空 = 全部
   const [items, setItems] = useState<Post[]>([]);
   const [page, setPage] = useState(0);
   const [pages, setPages] = useState(1);
@@ -17,16 +19,22 @@ export function PostsPage({ onBack, wide }: { onBack: () => void; wide: boolean 
   const busy = useRef(false);
   const sentinel = useRef<HTMLDivElement>(null);
 
-  const loadMore = async () => {
-    if (busy.current || page >= pages) return;
+  useEffect(() => {
+    api.postCategories().then((r) => setCats(r?.items || [])).catch(() => {});
+  }, []);
+
+  const loadMore = async (reset = false) => {
+    if (busy.current) return;
+    const next = reset ? 1 : page + 1;
+    if (!reset && next > pages) return;
     busy.current = true;
     setLoading(true);
     try {
-      const next = page + 1;
-      const res = await api.posts(next, 20);
+      const res = cat ? await api.postCategory(cat, next, 20) : await api.posts(next, 20);
       setItems((prev) => {
-        const seen = new Set(prev.map((x) => x.id));
-        return [...prev, ...(res?.items || []).filter((x) => !seen.has(x.id))];
+        const base = reset ? [] : prev;
+        const seen = new Set(base.map((x) => x.id));
+        return [...base, ...(res?.items || []).filter((x) => !seen.has(x.id))];
       });
       setPage(next);
       setPages(res?.pagination?.pages || next);
@@ -36,7 +44,15 @@ export function PostsPage({ onBack, wide }: { onBack: () => void; wide: boolean 
     }
   };
 
-  useEffect(() => { loadMore(); /* eslint-disable-next-line */ }, []);
+  const pickCat = (route: string) => {
+    if (route === cat) return;
+    setCat(route);
+    setItems([]);
+    setPage(0);
+    setPages(1);
+  };
+
+  useEffect(() => { loadMore(true); /* eslint-disable-next-line */ }, [cat]);
   useEffect(() => {
     const el = sentinel.current;
     if (!el) return;
@@ -44,7 +60,7 @@ export function PostsPage({ onBack, wide }: { onBack: () => void; wide: boolean 
     io.observe(el);
     return () => io.disconnect();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, pages]);
+  }, [page, pages, cat]);
 
   return (
     <div className="absolute inset-0 bg-bg flex flex-col">
@@ -52,7 +68,20 @@ export function PostsPage({ onBack, wide }: { onBack: () => void; wide: boolean 
         <button onClick={onBack} className="w-9 h-9 rounded-full flex items-center justify-center text-on hover:bg-s3 pressable"><IBack size={19} /></button>
         <span className="text-[14px] font-bold text-on">黄果吃瓜</span>
         <span className="text-[10.5px] text-mut ml-1">圈内爆料</span>
+        <button onClick={() => { pop(); setTab("search"); }} aria-label="搜索" className="ml-auto w-9 h-9 rounded-full flex items-center justify-center text-on hover:bg-s3 pressable"><ISearch size={19} /></button>
       </div>
+      {cats.length > 0 && (
+        <div className="shrink-0 flex gap-2 px-4 py-2.5 overflow-x-auto no-bar">
+          <button onClick={() => pickCat("")}
+            className={`shrink-0 px-4 h-8 rounded-(--r-ctl) text-[12px] font-semibold pressable ${cat === "" ? "tonal text-on-sec" : "bg-s3 text-mut"}`}
+            style={cat === "" ? { background: "var(--p-sec)", color: "var(--p-primary)" } : undefined}>全部</button>
+          {cats.map((c) => (
+            <button key={c.route} onClick={() => pickCat(c.route)}
+              className={`shrink-0 px-4 h-8 rounded-(--r-ctl) text-[12px] font-semibold pressable ${cat === c.route ? "tonal text-on-sec" : "bg-s3 text-mut"}`}
+              style={cat === c.route ? { background: "var(--p-sec)", color: "var(--p-primary)" } : undefined}>{c.name}</button>
+          ))}
+        </div>
+      )}
       <div className="flex-1 scroll-y px-3 pt-3 pb-8">
         {items.length ? (
           <div className={`${wide ? "columns-3 xl:columns-4" : "columns-2"} gap-2`}>
@@ -91,7 +120,13 @@ export function PostDetail({ id, onBack, active = true }: { id: number; onBack: 
   const [post, setPost] = useState<(Post & { content?: string; video_url?: string }) | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [play, setPlay] = useState(false);
+  /* 吃瓜帖详情里的 video_url 恒为空，视频地址只在 playback 接口里；
+     不解析就整页只有图文（issue #11）。segs 是分段地址，多数帖只有 1 段。 */
+  const [segs, setSegs] = useState<string[]>([]);
+  const [seg, setSeg] = useState(0);
+  const [resolving, setResolving] = useState(false);
   const content = post?.content || "";
+  const src = segs[seg] || "";
   const safeHtml = useMemo(() => sanitizeHtml(content), [content, strictSecurity]);
   const openSafeLink = (url: string) => {
     api.openUrl(url).catch(() => {
@@ -101,9 +136,26 @@ export function PostDetail({ id, onBack, active = true }: { id: number; onBack: 
 
   useEffect(() => {
     let alive = true;
+    setPlay(false);
+    setSegs([]);
+    setSeg(0);
     api.post(id)
-      .then((p) => { if (alive) setPost(p); })
+      .then((p) => {
+        if (!alive) return;
+        setPost(p);
+        /* 老字段有值就直接用，省一次请求 */
+        if (p.video_url) { setSegs([p.video_url]); setPlay(true); }
+      })
       .catch((e) => { if (alive) setErr((e as Error).message || "加载失败"); });
+    setResolving(true);
+    api.postPlayback(id)
+      .then((r) => {
+        if (!alive) return;
+        const list = (r?.videos || []).map((v) => v?.url || "").filter(Boolean);
+        if (list.length) { setSegs(list); setPlay(true); }
+      })
+      .catch(() => { /* 无视频：保持图文 */ })
+      .finally(() => { if (alive) setResolving(false); });
     return () => { alive = false; };
   }, [id]);
 
@@ -122,18 +174,37 @@ export function PostDetail({ id, onBack, active = true }: { id: number; onBack: 
         ) : (
           <>
             <div className="relative w-full bg-black" style={{ height: "min(40vh, 360px)" }}>
-              {play && post.video_url ? (
-                <Player src={post.video_url} poster={cover(post.cover)} autoPlay active={active} controls muted={muted}
-                  onToggleMute={() => setMuted((m) => !m)} diagnosticContext={{ video_id: id, active }} className="w-full h-full" />
+              {play && src ? (
+                <Player src={src} poster={cover(post.cover)} autoPlay active={active} controls muted={muted}
+                  onToggleMute={() => setMuted((m) => !m)} diagnosticContext={{ video_id: id, active }} className="w-full h-full"
+                  onEnded={() => {
+                    /* 多段吃瓜视频：播完自动接下一段 */
+                    if (seg < segs.length - 1) setSeg(seg + 1); else setPlay(false);
+                  }} />
               ) : (
-                <button onClick={() => { if (post.video_url) setPlay(true); else toast("该帖子没有视频", "info"); }} className="absolute inset-0">
+                <button onClick={() => { if (src) setPlay(true); else if (!resolving) toast("该帖子没有视频", "info"); }} className="absolute inset-0">
                   <Img src={post.cover} eager />
-                  <span className="absolute inset-0 flex items-center justify-center">
-                    <span className="w-14 h-14 rounded-full bg-black/50 backdrop-blur-sm flex items-center justify-center elev-2">
-                      <IPlayF size={24} className="text-white ml-0.5" />
+                  {src && (
+                    <span className="absolute inset-0 flex items-center justify-center">
+                      <span className="w-14 h-14 rounded-full bg-black/50 backdrop-blur-sm flex items-center justify-center elev-2">
+                        <IPlayF size={24} className="text-white ml-0.5" />
+                      </span>
                     </span>
-                  </span>
+                  )}
                 </button>
+              )}
+              {segs.length > 1 && (
+                <div className="absolute top-2 right-2 z-30 flex items-center gap-1 max-w-[70%] overflow-x-auto no-bar">
+                  {segs.map((_, i) => (
+                    <button key={i} onClick={() => { setSeg(i); setPlay(true); }}
+                      className="shrink-0 h-6 px-2 rounded-full text-[10.5px] font-semibold pressable"
+                      style={i === seg
+                        ? { background: "var(--p-primary)", color: "var(--p-on-primary)" }
+                        : { background: "rgba(0,0,0,.55)", color: "rgba(255,255,255,.85)" }}>
+                      {i + 1}
+                    </button>
+                  ))}
+                </div>
               )}
             </div>
             <div className="px-4 pt-3.5">

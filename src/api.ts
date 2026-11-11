@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
+import { tracePlayback } from "./playbackDiagnostics";
 import type {
-  CommentPage, Detail, Paged, PlayInfo, Post, RankItem, User, VideoCard,
+  CommentPage, Detail, HotWord, Paged, PlayInfo, Post, PostCategory, RankItem, TagGroup, TopicCard, TopicDetail, User, UserProfile, VideoCard,
 } from "./types";
 
 /* ── 运行环境 ───────────────────────────────────────────── */
@@ -11,7 +12,11 @@ export const APP_VERSION = __APP_VERSION__;
 const ua = navigator.userAgent;
 export const isAndroid = /Android/i.test(ua);
 /** iPhone 的 UA 也带「like Mac OS X」，必须先于 macOS 判断；iPadOS 默认伪装成 Mac，用触点数区分。 */
-export const isIos = /iPhone|iPad|iPod/i.test(ua) || (/Macintosh/i.test(ua) && navigator.maxTouchPoints > 1);
+export const isIos =
+  /iPhone|iPad|iPod/i.test(ua) ||
+  (/Macintosh/i.test(ua) && navigator.maxTouchPoints > 1) ||
+  // iPadOS 13+ 默认把自己报成 MacIntel，只能靠触点数认
+  (typeof navigator.platform === "string" && navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
 export const isMacos = !isIos && /Macintosh|Mac OS X/i.test(ua);
 /** Linux 桌面：webkit2gtk 的 UA 是「X11; Linux x86_64」。必须排在 Windows 之前判断，
  *  否则会被当成 Windows；而 Android 的 UA 里同样带「Linux」，所以必须先排除安卓。 */
@@ -55,6 +60,8 @@ const NET_FAIL = /dns|timed? ?out|timeout|connection|refused|reset|unreachable|b
 const READ_ONLY = new Set([
   "api_me", "api_feed", "api_category", "api_rank", "api_search",
   "api_posts", "api_post", "api_post_comments", "api_video", "api_play", "api_comments",
+  "api_topics", "api_topic", "api_tags", "api_tag_videos", "api_search_hot",
+  "api_post_playback", "api_post_categories", "api_post_category", "api_related", "api_following", "api_user", "api_user_stats", "api_user_videos",
 ]);
 /** 给自动选线用的观察点。api.ts 不反向依赖 autoLine，避免循环 import。 */
 export type NetObserver = (r: { ok: boolean; cmd: string; msg?: string; networkish?: boolean }) => void;
@@ -76,24 +83,28 @@ async function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> 
     return r;
   } catch (e) {
     const msg = typeof e === "string" ? e : "请求失败，请检查网络";
-    // 落盘完整错误链（dns error / connection refused / 证书错误…），toast 只显示截断版
-    logLine(`[api] ${cmd} → ${msg}`);
     const status = /^HTTP (\d{3})\b/.exec(msg)?.[1];
     const networkish = !status && NET_FAIL.test(msg);
+    // 落盘完整错误链（dns error / connection refused / 证书错误…），toast 只显示截断版
+    logLine(`[api] ${cmd} → ${msg}`);
+    tracePlayback("api.fail", { cmd, err: msg, status: status ?? null, networkish });
     notifyNet({ ok: false, cmd, msg, networkish });
     // 线路可能正被自动切走：给切换留一点时间，只读请求重试一次，用户就不用看见这条错误
     if (networkish && READ_ONLY.has(cmd)) {
       logLine(`[api] ${cmd} 链路异常，1.2s 后重试一次`);
+      tracePlayback("api.retry", { cmd, err: msg });
       await new Promise((r) => setTimeout(r, 1200));
       try {
         const r = await once();
         logLine(`[api] ${cmd} 重试成功`);
+        tracePlayback("api.retry_ok", { cmd });
         notifyNet({ ok: true, cmd });
         return r;
       } catch (e2) {
         const again = typeof e2 === "string" ? e2 : msg;
         const againStatus = /^HTTP (\d{3})\b/.exec(again)?.[1];
         logLine(`[api] ${cmd} 重试仍失败 → ${again}`);
+        tracePlayback("api.retry_failed", { cmd, err: again, status: againStatus ?? null });
         throw new Error(failMessage(again, againStatus));
       }
     }
@@ -121,6 +132,11 @@ export const api = {
   me: () => call<User>("api_me"),
 
   feed: (page = 1, size = 20) => call<Paged<VideoCard>>("api_feed", { page, size }),
+  topics: () => call<{ items: TopicCard[] }>("api_topics"),
+  topic: (slug: string) => call<TopicDetail>("api_topic", { slug }),
+  tags: () => call<{ categories: TagGroup[] }>("api_tags"),
+  tagVideos: (tag: string, page = 1, size = 20) =>
+    call<Paged<VideoCard>>("api_tag_videos", { tag, page, size }),
   category: (cate: string, page = 1, size = 20) =>
     call<Paged<VideoCard>>("api_category", { cate, page, size }),
   rank: (kind: "hot" | "recommend" | "potential") =>
@@ -129,8 +145,11 @@ export const api = {
     call<{ items: VideoCard[]; pagination: Paged<VideoCard>["pagination"]; keyword: string }>(
       "api_search", { q, page, size },
     ),
+  searchHot: () => call<{ items: HotWord[] }>("api_search_hot"),
   posts: (page = 1, size = 20) => call<Paged<Post>>("api_posts", { page, size }),
   post: (id: number) => call<Post & { content?: string; video_url?: string }>("api_post", { id }),
+  /** 吃瓜帖视频：详情里 video_url 恒为空，地址由 playback 接口下发（可能多段）。 */
+  postPlayback: (id: number) => call<{ mode?: number; videos?: { index: number; url: string }[] }>("api_post_playback", { id }),
 
   video: (id: number) => call<Detail>("api_video", { id }),
   play: (id: number, ep: number) => call<PlayInfo>("api_play", { id, ep }),
@@ -145,6 +164,14 @@ export const api = {
   postLike: (id: number, on: boolean) => invoke<unknown>("api_post_like", { id, on }),
   postCollect: (id: number, on: boolean) => invoke<unknown>("api_post_collect", { id, on }),
   postComments: (id: number, page: number, size: number) => call<CommentPage>("api_post_comments", { id, page, size }),
+  postCategories: () => call<{ items: PostCategory[] }>("api_post_categories"),
+  postCategory: (route: string, page = 1, size = 20) =>
+    call<Paged<Post>>("api_post_category", { route, page, size }),
+  related: (id: number) => call<{ items: VideoCard[] }>("api_related", { id }),
+  following: (page = 1, size = 20) => call<Paged<VideoCard>>("api_following", { page, size }),
+  user: (id: number) => call<UserProfile>("api_user", { id }),
+  userStats: (id: number) => call<{ user_id: number; like_count: number; following: number; followers: number; video_count: number; post_count: number }>("api_user_stats", { id }),
+  userVideos: (id: number, page = 1, size = 20) => call<Paged<VideoCard>>("api_user_videos", { id, page, size }),
   like: (id: number, ep: number, on: boolean) => call<unknown>("api_like", { id, ep, on }),
   collect: (id: number, on: boolean) => call<unknown>("api_collect", { id, on }),
   follow: (uid: number, on: boolean) => call<unknown>("api_follow", { uid, on }),
@@ -162,9 +189,6 @@ export const api = {
 
   /* 更新检查：对比 GitHub Release 的 tag */
   checkUpdate: () => call<UpdateInfo>("check_update"),
-  /* 应用内更新：下载安装包（直连失败逐个走加速源）→ 交给系统安装器 */
-  downloadUpdate: (url: string, name: string) => call<string>("download_update", { url, name }),
-  installUpdate: (path: string) => call<void>("install_update", { path }),
   openUrl: (url: string) => call<void>("open_url", { url }),
 };
 

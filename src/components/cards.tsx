@@ -31,14 +31,17 @@ export function WaterfallCard({ v, onOpen }: { v: VideoCard; onOpen: () => void 
 }
 
 /* ——— 近无缝瀑布流 ——— */
+/* 卡片固定 1.32 比例，改用 CSS Grid 代替 CSS multi-column：
+   WebKitGTK 2.52.6 在 columns + column-fill:balance 下会裁剪/丢弃第 2、3 列顶部的首卡，
+   Grid 布局绕开该渲染 bug；translateZ(0) 兜底强制合成层，避免再次被裁剪。 */
 export function Masonry({ videos, onOpen, wide = false, gap = "gap-1" }: {
   videos: VideoCard[]; onOpen: (v: VideoCard) => void; wide?: boolean; gap?: string;
 }) {
-  const mb = gap === "gap-1" ? "mb-1" : "mb-1.5";
+  const cols = wide ? "grid-cols-3 xl:grid-cols-4" : "grid-cols-2";
   return (
-    <div className={`${wide ? "columns-3 xl:columns-4" : "columns-2"} ${gap} [column-fill:balance]`}>
+    <div className={`grid ${cols} ${gap} items-start`}>
       {videos.map((v) => (
-        <div key={v.id} className={`break-inside-avoid ${mb}`}>
+        <div key={v.id} style={{ transform: "translateZ(0)" }}>
           <WaterfallCard v={v} onOpen={() => onOpen(v)} />
         </div>
       ))}

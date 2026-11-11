@@ -314,97 +314,6 @@ fn asset_rank(name: &str) -> u8 {
     }
 }
 
-/// GitHub 下载加速：国内直连 release 资产基本拉不动，逐个试。
-const UPDATE_PROXIES: [&str; 3] = [
-    "https://ghfast.top",
-    "https://gh-proxy.com",
-    "https://ghproxy.net",
-];
-
-async fn fetch_update_bytes(url: &str) -> Result<Vec<u8>, String> {
-    let resp = crate::net::get(
-        url,
-        std::time::Duration::from_secs(180),
-        Some("application/octet-stream"),
-        None,
-    )
-    .await?;
-    if !resp.status().is_success() {
-        return Err(format!("HTTP {}", resp.status()));
-    }
-    let bytes = resp.bytes().await.map_err(|e| crate::net::err_text(&e))?;
-    Ok(bytes.to_vec())
-}
-
-/// 应用内更新第一步：把安装包拉到本机缓存。
-///
-/// 顺序是「直连 → 三个加速源」，谁先成用谁；拉回来太小的当失败（加速源
-/// 常常 200 回来一段 HTML 错误页，不能写进文件当 apk）。
-#[tauri::command]
-pub async fn download_update(
-    app: tauri::AppHandle,
-    url: String,
-    name: String,
-) -> Result<String, String> {
-    use tauri::Manager;
-    let dir = app
-        .path()
-        .app_cache_dir()
-        .map_err(|e| e.to_string())?
-        .join("update");
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let safe: String = name
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | '+') {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let target = dir.join(if safe.is_empty() { "update.bin".into() } else { safe });
-
-    let mut tried: Vec<String> = vec![url.clone()];
-    for proxy in UPDATE_PROXIES {
-        tried.push(format!("{proxy}/{url}"));
-    }
-    let mut last = String::from("未知错误");
-    for u in tried {
-        let proxied = u != url;
-        match fetch_update_bytes(&u).await {
-            Ok(bytes) if bytes.len() > 512 * 1024 => {
-                std::fs::write(&target, &bytes).map_err(|e| e.to_string())?;
-                crate::playback_log::record(
-                    "update.downloaded",
-                    json!({ "bytes": bytes.len(), "via_proxy": proxied }),
-                );
-                return Ok(target.to_string_lossy().to_string());
-            }
-            Ok(bytes) => last = format!("{} 只回来 {} 字节", if proxied { "加速源" } else { "直连" }, bytes.len()),
-            Err(e) => last = format!("{}: {e}", if proxied { "加速源" } else { "直连" }),
-        }
-    }
-    Err(format!(
-        "下载失败（直连和 {} 个加速源都没成）：{last}",
-        UPDATE_PROXIES.len()
-    ))
-}
-
-/// 应用内更新第二步：把安装包交给系统。
-///
-/// 安卓走 FileProvider + ACTION_VIEW，系统弹安装器（首次会问「允许来自此来源」）；
-/// 桌面直接把文件丢给默认程序。
-#[tauri::command]
-pub async fn install_update(app: tauri::AppHandle, path: String) -> Result<(), String> {
-    if !std::path::Path::new(&path).exists() {
-        return Err("安装包不见了，重新下载一次".to_string());
-    }
-    app.opener()
-        .open_path(path, None::<&str>)
-        .map_err(|e| format!("调不起安装器：{e}"))
-}
-
 #[tauri::command]
 pub async fn open_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
     let target = crate::network_policy::parse_target(&url)?;
@@ -412,6 +321,133 @@ pub async fn open_url(app: tauri::AppHandle, url: String) -> Result<(), String> 
     app.opener()
         .open_url(target.as_str(), None::<&str>)
         .map_err(|e| e.to_string())
+}
+
+/// 切换移动端屏幕方向（iOS 原生旋转：横屏 Landscape / 竖屏 Portrait）。
+#[tauri::command]
+pub async fn set_orientation(app: tauri::AppHandle, landscape: bool) -> Result<(), String> {
+    #[cfg(target_os = "ios")]
+    {
+        let _ = app.run_on_main_thread(move || {
+            request_ios_orientation(landscape);
+        });
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        let _ = (&app, landscape);
+    }
+    Ok(())
+}
+
+/// iOS 专用：切换 WKWebView 文本交互。
+/// 主界面默认关闭以消除长按快进时的系统放大镜；输入框聚焦时前端调用此命令重新打开，
+/// 失焦后再关闭，避免影响搜索/评论/登录等文本输入。
+#[tauri::command]
+pub fn set_text_interaction(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    #[cfg(target_os = "ios")]
+    {
+        use tauri::Manager;
+        if let Some(window) = app.get_webview_window("main") {
+            crate::ios_layout::set_text_interaction_on_webview(window.as_ref(), enabled);
+        }
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        let _ = (&app, enabled);
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "ios")]
+fn request_ios_orientation(landscape: bool) {
+    use std::ffi::{c_char, c_void};
+    extern "C" {
+        fn objc_getClass(name: *const c_char) -> *mut c_void;
+        fn sel_registerName(name: *const c_char) -> *mut c_void;
+        fn objc_msgSend();
+    }
+    unsafe {
+        let msg0: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void =
+            std::mem::transmute(objc_msgSend as *const ());
+        let msg0_usize: unsafe extern "C" fn(*mut c_void, *mut c_void) -> usize =
+            std::mem::transmute(objc_msgSend as *const ());
+        let msg1_usize: unsafe extern "C" fn(*mut c_void, *mut c_void, usize) -> *mut c_void =
+            std::mem::transmute(objc_msgSend as *const ());
+        let msg2_ptr: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void, *mut c_void) =
+            std::mem::transmute(objc_msgSend as *const ());
+        let msg1_void: unsafe extern "C" fn(*mut c_void, *mut c_void) =
+            std::mem::transmute(objc_msgSend as *const ());
+
+        // iOS 16+ UIWindowScene.requestGeometryUpdateWithPreferences:errorHandler:
+        // UIInterfaceOrientationMaskPortrait = 1 << 1 = 2
+        // UIInterfaceOrientationMaskLandscapeRight = 1 << 3 = 8
+        let mask: usize = if landscape { 8 } else { 2 };
+        let prefs_cls = objc_getClass(b"UIWindowSceneGeometryPreferencesIOS\0".as_ptr() as *const c_char);
+        let app_cls = objc_getClass(b"UIApplication\0".as_ptr() as *const c_char);
+        if !prefs_cls.is_null() && !app_cls.is_null() {
+            let sel_alloc = sel_registerName(b"alloc\0".as_ptr() as *const c_char);
+            let sel_init = sel_registerName(b"initWithInterfaceOrientations:\0".as_ptr() as *const c_char);
+            let raw_prefs = msg0(prefs_cls, sel_alloc);
+            let prefs = if !raw_prefs.is_null() {
+                msg1_usize(raw_prefs, sel_init, mask)
+            } else {
+                std::ptr::null_mut()
+            };
+
+            let sel_shared = sel_registerName(b"sharedApplication\0".as_ptr() as *const c_char);
+            let app = msg0(app_cls, sel_shared);
+            if !app.is_null() && !prefs.is_null() {
+                let sel_scenes = sel_registerName(b"connectedScenes\0".as_ptr() as *const c_char);
+                let scenes_set = msg0(app, sel_scenes);
+                if !scenes_set.is_null() {
+                    let sel_all = sel_registerName(b"allObjects\0".as_ptr() as *const c_char);
+                    let arr = msg0(scenes_set, sel_all);
+                    if !arr.is_null() {
+                        let sel_count = sel_registerName(b"count\0".as_ptr() as *const c_char);
+                        let sel_at = sel_registerName(b"objectAtIndex:\0".as_ptr() as *const c_char);
+                        let sel_req = sel_registerName(
+                            b"requestGeometryUpdateWithPreferences:errorHandler:\0".as_ptr() as *const c_char,
+                        );
+                        let sel_responds = sel_registerName(b"respondsToSelector:\0".as_ptr() as *const c_char);
+                        let msg_responds: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> bool =
+                            std::mem::transmute(objc_msgSend as *const ());
+                        let count = msg0_usize(arr, sel_count);
+                        for i in 0..count {
+                            let scene = msg1_usize(arr, sel_at, i);
+                            if !scene.is_null() && msg_responds(scene, sel_responds, sel_req) {
+                                msg2_ptr(scene, sel_req, prefs, std::ptr::null_mut());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Fallback: UIDevice setValue:forKey:@"orientation" + attemptRotationToDeviceOrientation
+        let dev_cls = objc_getClass(b"UIDevice\0".as_ptr() as *const c_char);
+        let num_cls = objc_getClass(b"NSNumber\0".as_ptr() as *const c_char);
+        let str_cls = objc_getClass(b"NSString\0".as_ptr() as *const c_char);
+        let vc_cls = objc_getClass(b"UIViewController\0".as_ptr() as *const c_char);
+        if !dev_cls.is_null() && !num_cls.is_null() && !str_cls.is_null() {
+            let sel_cur = sel_registerName(b"currentDevice\0".as_ptr() as *const c_char);
+            let dev = msg0(dev_cls, sel_cur);
+            let sel_num = sel_registerName(b"numberWithInteger:\0".as_ptr() as *const c_char);
+            let orient_val: usize = if landscape { 3 } else { 1 };
+            let num = msg1_usize(num_cls, sel_num, orient_val);
+            let sel_str = sel_registerName(b"stringWithUTF8String:\0".as_ptr() as *const c_char);
+            let msg_str: unsafe extern "C" fn(*mut c_void, *mut c_void, *const c_char) -> *mut c_void =
+                std::mem::transmute(objc_msgSend as *const ());
+            let key = msg_str(str_cls, sel_str, b"orientation\0".as_ptr() as *const c_char);
+            if !dev.is_null() && !num.is_null() && !key.is_null() {
+                let sel_set_val = sel_registerName(b"setValue:forKey:\0".as_ptr() as *const c_char);
+                msg2_ptr(dev, sel_set_val, num, key);
+            }
+            if !vc_cls.is_null() {
+                let sel_attempt = sel_registerName(b"attemptRotationToDeviceOrientation\0".as_ptr() as *const c_char);
+                msg1_void(vc_cls, sel_attempt);
+            }
+        }
+    }
 }
 
 /* ───────────────────────── 会话 ───────────────────────── */
@@ -544,6 +580,41 @@ pub async fn api_feed(state: State<'_, Api>, page: u32, size: u32) -> Result<Val
         .await
 }
 
+/* ───────────────────────── 专题 / 标签 ───────────────────────── */
+
+/// 专题列表：`/api/topics` 返回 data.items（标题/封面/简介/收录数）。
+#[tauri::command]
+pub async fn api_topics(state: State<'_, Api>) -> Result<Value, String> {
+    state.get("/api/topics?size=100").await
+}
+
+/// 专题详情：`/api/topics/{slug}` 返回 data = { topic, videos, related }。
+#[tauri::command]
+pub async fn api_topic(state: State<'_, Api>, slug: String) -> Result<Value, String> {
+    let encoded: String = url::form_urlencoded::byte_serialize(slug.as_bytes()).collect();
+    state.get(&format!("/api/topics/{encoded}")).await
+}
+
+/// 标签分组：`/api/tags` 返回 data.categories[]，每个含 tags[]（name/slug/hot_score）。
+#[tauri::command]
+pub async fn api_tags(state: State<'_, Api>) -> Result<Value, String> {
+    state.get("/api/tags").await
+}
+
+/// 按标签取视频：后端按中文标签名匹配（网页 /tag/<slug>/ 实际请求 /api/videos/tag/<name>）。
+#[tauri::command]
+pub async fn api_tag_videos(
+    state: State<'_, Api>,
+    tag: String,
+    page: u32,
+    size: u32,
+) -> Result<Value, String> {
+    let encoded: String = url::form_urlencoded::byte_serialize(tag.as_bytes()).collect();
+    state
+        .get(&format!("/api/videos/tag/{encoded}?page={page}&size={size}"))
+        .await
+}
+
 #[tauri::command]
 pub async fn api_category(
     state: State<'_, Api>,
@@ -580,6 +651,12 @@ pub async fn api_search(
         .await
 }
 
+/// 热搜榜：`/api/search/hot` 返回 data.items（word/heat）。
+#[tauri::command]
+pub async fn api_search_hot(state: State<'_, Api>) -> Result<Value, String> {
+    state.get("/api/search/hot").await
+}
+
 #[tauri::command]
 pub async fn api_posts(state: State<'_, Api>, page: u32, size: u32) -> Result<Value, String> {
     state
@@ -592,6 +669,18 @@ pub async fn api_post(state: State<'_, Api>, id: i64) -> Result<Value, String> {
     state.get(&format!("/api/posts/{id}")).await
 }
 
+/// 吃瓜帖视频：`POST /api/posts/{id}/playback` → `data.videos[].url`（mode=1 为明文 m3u8）。
+///
+/// 帖详情里的 `video_url` / `video_api` 恒为空，视频地址只由这个接口下发；
+/// 不调它的话吃瓜页永远只有图文（issue #11）。无视频时接口返回 status=0
+/// 「视频不存在或不可播放」，经 `edge()` 转换后就是 Err，前端按「无视频」处理。
+#[tauri::command]
+pub async fn api_post_playback(state: State<'_, Api>, id: i64) -> Result<Value, String> {
+    state
+        .post(&format!("/api/posts/{id}/playback"), Some(json!({})))
+        .await
+}
+
 /* ───────────────────────── 详情 / 播放 ───────────────────────── */
 
 #[tauri::command]
@@ -599,14 +688,67 @@ pub async fn api_video(state: State<'_, Api>, id: i64) -> Result<Value, String> 
     state.get(&format!("/api/videos/{id}")).await
 }
 
+fn non_empty(v: Option<&Value>) -> Option<&Value> {
+    v.filter(|x| !x.is_null() && x.as_str().is_some_and(|s| !s.trim().is_empty()))
+}
+
+/// 把新接口返回的 streams.main / streams.hevc 回填到 video_url / video_url_hevc，
+/// 前端只认 video_url，旧字段缺失时也兼容。
+fn normalize_play_info(info: &mut Value) {
+    let Some(obj) = info.as_object_mut() else { return };
+    for (field, key) in [("video_url", "main"), ("video_url_hevc", "hevc")] {
+        let url = obj
+            .get("streams")
+            .and_then(|st| st.get(key))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .map(str::to_owned);
+        if let Some(url) = url {
+            if non_empty(obj.get(field)).is_none() {
+                obj.insert(field.into(), json!(url));
+            }
+        }
+    }
+}
+
+fn has_play_url(info: &Value) -> bool {
+    info.get("video_url")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.trim().is_empty())
+}
+
 #[tauri::command]
 pub async fn api_play(state: State<'_, Api>, id: i64, ep: u32) -> Result<Value, String> {
-    state
+    // 优先走新接口；失败或没有可用地址时退回旧接口，两者都不行就返回新接口的结果/错误。
+    let primary = state
         .post(
             &format!("/api/videos/{id}/episodes/{ep}/playback"),
             Some(json!({})),
         )
         .await
+        .map(|mut info| {
+            normalize_play_info(&mut info);
+            info
+        });
+    if let Ok(info) = &primary {
+        if has_play_url(info) {
+            return primary;
+        }
+    }
+    match state
+        .get(&format!("/api/videos/{id}/play?ep={ep}&page_texts=0"))
+        .await
+    {
+        Ok(mut legacy) => {
+            normalize_play_info(&mut legacy);
+            if has_play_url(&legacy) || primary.is_err() {
+                Ok(legacy)
+            } else {
+                primary
+            }
+        }
+        Err(_) => primary,
+    }
 }
 
 /* ───────────────────────── 评论 / 互动 ───────────────────────── */
@@ -704,6 +846,69 @@ pub async fn api_post_comments(
 ) -> Result<Value, String> {
     state
         .get(&format!("/api/posts/{id}/comments?page={page}&size={size}"))
+        .await
+}
+
+/// 吃瓜分类：`/api/site/categories/post` 返回 data.items（name/route）。
+#[tauri::command]
+pub async fn api_post_categories(state: State<'_, Api>) -> Result<Value, String> {
+    state.get("/api/site/categories/post").await
+}
+
+/// 按分类取吃瓜帖：`/api/posts/category/{route}`。
+#[tauri::command]
+pub async fn api_post_category(
+    state: State<'_, Api>,
+    route: String,
+    page: u32,
+    size: u32,
+) -> Result<Value, String> {
+    let encoded: String = url::form_urlencoded::byte_serialize(route.as_bytes()).collect();
+    state
+        .get(&format!("/api/posts/category/{encoded}?page={page}&size={size}"))
+        .await
+}
+
+/// 相关推荐：`/api/videos/{id}/related` 返回 data.items。
+#[tauri::command]
+pub async fn api_related(state: State<'_, Api>, id: i64) -> Result<Value, String> {
+    state.get(&format!("/api/videos/{id}/related")).await
+}
+
+/// 关注流：`/api/videos/following`（需登录）。
+#[tauri::command]
+pub async fn api_following(
+    state: State<'_, Api>,
+    page: u32,
+    size: u32,
+) -> Result<Value, String> {
+    state
+        .authed("GET", &format!("/api/videos/following?page={page}&size={size}"), None)
+        .await
+}
+
+/// 用户主页：`/api/users/{id}`。
+#[tauri::command]
+pub async fn api_user(state: State<'_, Api>, id: i64) -> Result<Value, String> {
+    state.get(&format!("/api/users/{id}")).await
+}
+
+/// 用户统计：`/api/users/{id}/stats`。
+#[tauri::command]
+pub async fn api_user_stats(state: State<'_, Api>, id: i64) -> Result<Value, String> {
+    state.get(&format!("/api/users/{id}/stats")).await
+}
+
+/// 用户作品：`/api/videos/user/{id}`。
+#[tauri::command]
+pub async fn api_user_videos(
+    state: State<'_, Api>,
+    id: i64,
+    page: u32,
+    size: u32,
+) -> Result<Value, String> {
+    state
+        .get(&format!("/api/videos/user/{id}?page={page}&size={size}"))
         .await
 }
 #[cfg(test)]

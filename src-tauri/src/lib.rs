@@ -1,4 +1,6 @@
 mod api;
+#[cfg(target_os = "ios")]
+mod ios_layout;
 mod lines;
 #[cfg(target_os = "linux")]
 mod linux_http;
@@ -6,6 +8,7 @@ mod logging;
 #[cfg(target_os = "macos")]
 mod macos_titlebar;
 mod media;
+mod media_dns;
 mod net;
 mod network_policy;
 mod playback_log;
@@ -54,6 +57,27 @@ pub fn run() {
                 .build(),
         )
         .manage(Api::new())
+        .on_page_load(|webview, payload| {
+            #[cfg(target_os = "ios")]
+            {
+                let finished = payload.event() == tauri::webview::PageLoadEvent::Finished;
+                ios_layout::apply(webview, finished);
+                if finished {
+                    // 默认关闭 WKWebView 文本交互，消除视频长按快进时的系统放大镜。
+                    // 前端在输入框聚焦时再按需打开（见 api::set_text_interaction）。
+                    ios_layout::set_text_interaction_on_webview(webview, false);
+                    let wv = (*webview).clone();
+                    tauri::async_runtime::spawn(async move {
+                        for delay_ms in [80_u64, 350] {
+                            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                            ios_layout::apply(&wv, true);
+                        }
+                    });
+                }
+            }
+            #[cfg(not(target_os = "ios"))]
+            let _ = (webview, payload);
+        })
         .setup(|app| {
             if let Ok(dir) = app.path().app_data_dir() {
                 let _ = std::fs::create_dir_all(&dir);
@@ -136,6 +160,10 @@ pub fn run() {
                         .insert("Access-Control-Allow-Origin", origin);
                     resp.headers_mut()
                         .insert("Vary", tauri::http::HeaderValue::from_static("Origin"));
+                } else {
+                    // WKWebView 内部页面可能不给 Origin；这时回 * 才能拿到分片
+                    resp.headers_mut()
+                        .insert("Access-Control-Allow-Origin", tauri::http::HeaderValue::from_static("*"));
                 }
                 responder.respond(resp);
             });
@@ -157,23 +185,36 @@ pub fn run() {
             api::line_try_main,
             api::line_health,
             api::check_update,
-            api::download_update,
-            api::install_update,
             api::open_url,
+            api::set_orientation,
+            api::set_text_interaction,
             api::api_login,
             api::api_register,
             api::api_logout,
             api::api_me,
             api::api_feed,
+            api::api_topics,
+            api::api_topic,
+            api::api_tags,
+            api::api_tag_videos,
             api::api_category,
             api::api_rank,
             api::api_search,
+            api::api_search_hot,
             api::cache_clear,
             api::api_posts,
             api::api_post,
+            api::api_post_playback,
             api::api_post_like,
             api::api_post_collect,
             api::api_post_comments,
+            api::api_post_categories,
+            api::api_post_category,
+            api::api_related,
+            api::api_following,
+            api::api_user,
+            api::api_user_stats,
+            api::api_user_videos,
             api::api_video,
             api::api_play,
             api::api_comments,

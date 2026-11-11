@@ -4,7 +4,7 @@ import type { Post, VideoCard } from "../types";
 import { useStore } from "../store";
 import { Masonry, RowCard } from "../components/cards";
 import { Empty, Img } from "../components/ui";
-import { IBack, IChevR, IGrid, ITrophy } from "../icons";
+import { IBack, IChevR, IGlobe, IGrid, ISearch, ITrophy } from "../icons";
 
 export const CHANNELS = [
   { cate: "ai-duanju", name: "AI成人短剧", desc: "高能反转 · 一口气看完" },
@@ -70,7 +70,7 @@ export default function Category({ wide, active }: { wide: boolean; active: bool
       <div className="flex-1 scroll-y pb-24 pt-2">
         {/* 排行榜入口 */}
         <button onClick={() => push({ kind: "ranks" })}
-          className="mx-4 mb-5 w-[calc(100%-2rem)] flex items-center gap-3 rounded-(--r-md) bg-s2 p-3.5 text-left pressable elev-1">
+          className="mx-4 mb-2.5 w-[calc(100%-2rem)] flex items-center gap-3 rounded-(--r-md) bg-s2 p-3.5 text-left pressable elev-1">
           <span className="w-10 h-10 rounded-(--r-sm) bg-pc text-on-pc flex items-center justify-center shrink-0"><ITrophy size={20} /></span>
           <span className="flex-1">
             <span className="block text-[14.5px] font-semibold text-on">排行榜</span>
@@ -78,6 +78,28 @@ export default function Category({ wide, active }: { wide: boolean; active: bool
           </span>
           <IChevR size={16} className="text-mut" />
         </button>
+
+        {/* 专题 + 标签入口 */}
+        <div className="mx-4 mb-5 grid grid-cols-2 gap-2.5">
+          <button onClick={() => push({ kind: "topics" })}
+            className="flex items-center gap-2.5 rounded-(--r-md) bg-s2 p-3 text-left pressable elev-1">
+            <span className="w-9 h-9 rounded-(--r-sm) bg-pc text-on-pc flex items-center justify-center shrink-0"><IGrid size={18} /></span>
+            <span className="flex-1">
+              <span className="block text-[13.5px] font-semibold text-on">专题</span>
+              <span className="block text-[10px] text-mut mt-0.5">精选专辑合集</span>
+            </span>
+            <IChevR size={14} className="text-mut" />
+          </button>
+          <button onClick={() => push({ kind: "tags" })}
+            className="flex items-center gap-2.5 rounded-(--r-md) bg-s2 p-3 text-left pressable elev-1">
+            <span className="w-9 h-9 rounded-(--r-sm) bg-pc text-on-pc flex items-center justify-center shrink-0"><IGlobe size={18} /></span>
+            <span className="flex-1">
+              <span className="block text-[13.5px] font-semibold text-on">标签</span>
+              <span className="block text-[10px] text-mut mt-0.5">按题材找片</span>
+            </span>
+            <IChevR size={14} className="text-mut" />
+          </button>
+        </div>
 
         {CHANNELS.map((c, ci) => {
           const list = rows[c.cate] || [];
@@ -153,7 +175,7 @@ function PreviewStatus({ name, loading, error, onRetry }: { name: string; loadin
 
 /* ================= 频道详情页 ================= */
 export function ChannelPage({ cate, name, onBack, wide }: { cate: string; name: string; onBack: () => void; wide: boolean }) {
-  const { push } = useStore();
+  const { push, pop, setTab } = useStore();
   const [sort, setSort] = useState<"最新" | "最热" | "高分">("最新");
   const [items, setItems] = useState<VideoCard[]>([]);
   const [page, setPage] = useState(0);
@@ -210,6 +232,7 @@ export function ChannelPage({ cate, name, onBack, wide }: { cate: string; name: 
           <div className="flex-1 min-w-0">
             <div className="text-[17px] font-bold text-on leading-tight">{name}</div>
             <div className="text-[10.5px] text-mut">共 {items.length} 部 · 已加载 {page}/{Math.max(pages, 1)} 页</div>
+            <button onClick={() => { pop(); setTab("search"); }} aria-label="搜索" className="ml-auto w-9 h-9 rounded-full flex items-center justify-center text-on hover:bg-s3 pressable"><ISearch size={19} /></button>
           </div>
         </div>
         <div className="px-4 pb-3 flex gap-2">

@@ -23,7 +23,7 @@ on:
         default: ""
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ github.ref }}-${{ github.event_name }}-${{ github.run_id }}
   cancel-in-progress: true
 
 env:
@@ -34,6 +34,7 @@ jobs:
   windows:
     name: Windows (setup + portable)
     runs-on: windows-latest
+    timeout-minutes: 60
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.platforms == 'all' || inputs.platforms == 'windows' }}
     env:
       CARGO_PROFILE_RELEASE_LTO: ${{ inputs.quick && 'thin' || 'true' }}
@@ -69,6 +70,8 @@ jobs:
           cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
       - uses: swatinem/rust-cache@v2.9.3
+        continue-on-error: true
+        timeout-minutes: 8
         with:
           workspaces: src-tauri -> target
 
@@ -102,6 +105,7 @@ jobs:
   android:
     name: Android (split per ABI)
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.platforms == 'all' || startsWith(inputs.platforms, 'android') }}
     env:
       CARGO_PROFILE_RELEASE_LTO: ${{ inputs.quick && 'thin' || 'true' }}
@@ -157,6 +161,8 @@ jobs:
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
       - uses: swatinem/rust-cache@v2.9.3
+        continue-on-error: true
+        timeout-minutes: 8
         with:
           workspaces: src-tauri -> target
           key: android
@@ -223,6 +229,7 @@ jobs:
   macos:
     name: macOS (universal dmg)
     runs-on: macos-latest
+    timeout-minutes: 60
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.platforms == 'all' || inputs.platforms == 'macos' }}
     env:
       CARGO_PROFILE_RELEASE_LTO: ${{ inputs.quick && 'thin' || 'true' }}
@@ -260,6 +267,8 @@ jobs:
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
       - uses: swatinem/rust-cache@v2.9.3
+        continue-on-error: true
+        timeout-minutes: 8
         with:
           workspaces: src-tauri -> target
           key: macos
@@ -297,10 +306,12 @@ jobs:
   ios:
     name: iOS (unsigned ipa)
     runs-on: macos-latest
+    timeout-minutes: 60
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.platforms == 'all' || inputs.platforms == 'ios' }}
     env:
       CARGO_PROFILE_RELEASE_LTO: ${{ inputs.quick && 'thin' || 'true' }}
       CARGO_PROFILE_RELEASE_CODEGEN_UNITS: ${{ inputs.quick && '4' || '1' }}
+      APPLE_DEVELOPMENT_TEAM: "ABCDE12345"
     steps:
       - uses: actions/checkout@v7
 
@@ -328,57 +339,38 @@ jobs:
           cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-ios
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
       - uses: swatinem/rust-cache@v2.9.3
+        continue-on-error: true
+        timeout-minutes: 8
         with:
           workspaces: src-tauri -> target
           key: ios
       - run: pnpm install --frozen-lockfile
 
-      - name: 生成 iOS 工程
-        run: pnpm tauri ios init --ci
-
-      - name: 认工程名和 scheme
-        id: proj
-        shell: bash
+      # 跟上游一致：不在 pbxproj 里绕开 xcode-script，而是让 tauri ios build 的
+      # options server 活着，由 Xcode 用 release 配置跑 Build Rust Code。
+      - name: 生成 iOS 工程（带横竖屏 + ATS）
         run: |
-          ls -la src-tauri/gen/apple
-          cd src-tauri/gen/apple
-          P="$(ls -d *.xcodeproj | head -1)"
-          S="$(xcodebuild -list -project "$P" 2>/dev/null | awk '/Schemes:/{f=1;next} f&&NF{print $1;exit}')"
-          echo "xcodeproj=$P" >> "$GITHUB_OUTPUT"
-          echo "scheme=$S" >> "$GITHUB_OUTPUT"
-          echo "project=$P scheme=$S"
+          pnpm tauri ios init --ci
+          for plist in $(find src-tauri/gen/apple -name "Info.plist" 2>/dev/null); do
+            for key in "UISupportedInterfaceOrientations" "UISupportedInterfaceOrientations~iphone" "UISupportedInterfaceOrientations~ipad"; do
+              /usr/libexec/PlistBuddy -c "Delete :${key}" "$plist" 2>/dev/null || true
+              /usr/libexec/PlistBuddy -c "Add :${key} array" "$plist"
+              /usr/libexec/PlistBuddy -c "Add :${key}:0 string UIInterfaceOrientationPortrait" "$plist"
+              /usr/libexec/PlistBuddy -c "Add :${key}:1 string UIInterfaceOrientationLandscapeLeft" "$plist"
+              /usr/libexec/PlistBuddy -c "Add :${key}:2 string UIInterfaceOrientationLandscapeRight" "$plist"
+            done
+            /usr/libexec/PlistBuddy -c "Delete :NSAppTransportSecurity" "$plist" 2>/dev/null || true
+            /usr/libexec/PlistBuddy -c "Add :NSAppTransportSecurity dict" "$plist"
+            /usr/libexec/PlistBuddy -c "Add :NSAppTransportSecurity:NSAllowsArbitraryLoads bool true" "$plist"
+          done
 
-      - name: 构建（无签名 archive）
+      - name: 构建并打包 ipa
         shell: bash
-        run: |
-          set -euo pipefail
-          cd src-tauri/gen/apple
-          xcodebuild -project "${{ steps.proj.outputs.xcodeproj }}" \
-            -scheme "${{ steps.proj.outputs.scheme }}" \
-            -configuration Release \
-            -sdk iphoneos \
-            -destination 'generic/platform=iOS' \
-            -archivePath "$RUNNER_TEMP/HGhub.xcarchive" \
-            archive \
-            CODE_SIGN_IDENTITY="" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO \
-            2>&1 | tee "$RUNNER_TEMP/xcodebuild.log" | tail -50
-
-      - name: 打包 ipa
-        shell: bash
-        run: |
-          set -euo pipefail
-          APP_DIR="$RUNNER_TEMP/HGhub.xcarchive/Products/Applications"
-          ls -la "$APP_DIR"
-          APP="$(ls -d "$APP_DIR"/*.app | head -1)"
-          mkdir -p artifacts "$RUNNER_TEMP/Payload"
-          cp -R "$APP" "$RUNNER_TEMP/Payload/"
-          cd "$RUNNER_TEMP"
-          /usr/bin/zip -qry "$GITHUB_WORKSPACE/artifacts/HGhub_${{ steps.ver.outputs.version }}_ios.ipa" Payload
-          cd "$GITHUB_WORKSPACE"
-          unzip -l "artifacts/HGhub_${{ steps.ver.outputs.version }}_ios.ipa" | head -8
-          ls -lh artifacts
+        env:
+          APP_VERSION: ${{ steps.ver.outputs.version }}
+        run: bash scripts/build-ios-unsigned.sh "$APP_VERSION"
 
       - uses: actions/upload-artifact@v7
         with:
@@ -390,6 +382,7 @@ jobs:
   linux:
     name: Linux (deb)
     runs-on: ubuntu-22.04
+    timeout-minutes: 60
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.platforms == 'all' || inputs.platforms == 'linux' }}
     env:
       CARGO_PROFILE_RELEASE_LTO: ${{ inputs.quick && 'thin' || 'true' }}
@@ -433,6 +426,8 @@ jobs:
           cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
       - uses: swatinem/rust-cache@v2.9.3
+        continue-on-error: true
+        timeout-minutes: 8
         with:
           workspaces: src-tauri -> target
           key: linux
@@ -461,6 +456,7 @@ jobs:
   check:
     name: 编译检查（tsc + cargo check + 单测）
     runs-on: ubuntu-22.04
+    timeout-minutes: 60
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.platforms == 'check' }}
     steps:
       - uses: actions/checkout@v7
@@ -486,6 +482,8 @@ jobs:
           cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
       - uses: swatinem/rust-cache@v2.9.3
+        continue-on-error: true
+        timeout-minutes: 8
         with:
           workspaces: src-tauri -> target
           key: check
@@ -507,13 +505,20 @@ jobs:
   release:
     name: Publish GitHub Release
     needs: [windows, android, macos, linux, ios]
+    # always()：iOS 失败时不能把整包卡住，但成功时要等它的 ipa 一起发
     if: >-
-      startsWith(github.ref, 'refs/tags/v') ||
-      (github.event_name == 'workflow_dispatch' && inputs.tag != '')
+      always() &&
+      (startsWith(github.ref, 'refs/tags/v') ||
+      (github.event_name == 'workflow_dispatch' && inputs.tag != ''))
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
       - uses: actions/download-artifact@v8
         with:
           path: artifacts
@@ -522,10 +527,23 @@ jobs:
       - name: 列出待发布文件
         run: ls -lh artifacts
 
+      - name: 取版本说明
+        id: notes
+        run: |
+          TAG="${{ inputs.tag != '' && inputs.tag || github.ref_name }}"
+          F="docs/release-notes/${TAG}.md"
+          if [ -f "$F" ]; then
+            echo "body_path=$F" >> "$GITHUB_OUTPUT"
+            echo "使用 $F"
+          else
+            echo "body_path=" >> "$GITHUB_OUTPUT"
+            echo "没有 $F，回退自动生成的说明"
+          fi
       - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ inputs.tag != '' && inputs.tag || github.ref_name }}
           name: ${{ inputs.tag != '' && inputs.tag || github.ref_name }}
+          body_path: ${{ steps.notes.outputs.body_path }}
           files: artifacts/*
           generate_release_notes: true
           fail_on_unmatched_files: true

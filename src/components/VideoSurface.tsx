@@ -1,6 +1,6 @@
 import { useEffect, useImperativeHandle, useRef, forwardRef, useState } from "react";
 import Hls from "hls.js";
-import { isLocalMedia, playlist } from "../api";
+import { isLocalMedia, platform, playlist } from "../api";
 import { mediaErrorMessage } from "../mediaErrors";
 import { mediaHost, mediaResource, observeHls, usePlayerDiagnostics } from "../playbackDiagnostics";
 import { usePlaybackActivity } from "../usePlaybackActivity";
@@ -49,9 +49,19 @@ const VideoSurface = forwardRef<VideoHandle, Props>(function VideoSurface(
 ) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const hlsRef = useRef<Hls | null>(null);
+  const recoverCountRef = useRef(0);
+  const recoverTimerRef = useRef<number | null>(null);
+  const nearEndFiredRef = useRef(false);
   const [ready, setReady] = useState(false);
   const { trace, requestSeek } = usePlayerDiagnostics(videoRef, hlsRef, { ...diagnosticContext, active, resource: mediaResource(src) });
   const activity = usePlaybackActivity(videoRef, hlsRef, { active, autoPlay, src, trace });
+
+  const reportSize = (v: HTMLVideoElement | null) => {
+    if (!v) return;
+    const w = v.videoWidth || 0;
+    const h = v.videoHeight || 0;
+    if (w > 0 && h > 0) onSize?.(w, h);
+  };
 
   useImperativeHandle(ref, () => ({
     el: () => videoRef.current,
@@ -65,11 +75,16 @@ const VideoSurface = forwardRef<VideoHandle, Props>(function VideoSurface(
     },
     seek: (t: number, source = "handle") => {
       const v = videoRef.current;
-      if (v && Number.isFinite(t)) {
-        requestSeek(t, source);
-        try { v.currentTime = t; trace("seek.assigned", { target: t, source }); }
-        catch (e) { trace("seek.rejected", { error_name: (e as Error).name }); throw e; }
-      }
+      if (!v || !Number.isFinite(t)) return;
+      // iOS 上直接赋到 duration 会卡在 ended 态，夹到结尾前 0.15s
+      const dur = v.duration && Number.isFinite(v.duration) ? v.duration : 0;
+      const target = dur > 0 ? Math.max(0, Math.min(dur - 0.15, t)) : Math.max(0, t);
+      requestSeek(target, source);
+      if (hlsRef.current) { try { hlsRef.current.startLoad(target); } catch { /* ignore */ } }
+      const resume = !v.paused;
+      try { v.currentTime = target; trace("seek.assigned", { target, source }); }
+      catch (e) { trace("seek.rejected", { error_name: (e as Error).name }); throw e; }
+      if (resume) { const p = v.play(); if (p && p.catch) p.catch(() => {}); }
     },
     trace,
     rate: (r: number) => { const v = videoRef.current; if (v) v.playbackRate = r; },
@@ -81,6 +96,10 @@ const VideoSurface = forwardRef<VideoHandle, Props>(function VideoSurface(
     const video = videoRef.current;
     if (!video || !src) return;
     setReady(false);
+    nearEndFiredRef.current = false;
+    recoverCountRef.current = 0;
+    const onVideoResize = () => reportSize(video);
+    video.addEventListener("resize", onVideoResize);
     if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
 
     const proxied = isLocalMedia(src);
@@ -104,15 +123,22 @@ const VideoSurface = forwardRef<VideoHandle, Props>(function VideoSurface(
         interstitialsController: undefined,
         contentSteeringController: undefined,
         enableInterstitialPlayback: false,
-        enableWorker: true,
+        // WKWebView 里 hls.js 的 worker 不稳，iOS 关掉
+        enableWorker: platform !== "ios",
         // Prefer standard MSE on macOS; hls.js handles MMS-only fallback and seek recovery.
         preferManagedMediaSource: false,
         autoStartLoad: false,
         maxBufferLength: 30,
+        maxMaxBufferLength: 60,
         backBufferLength: 30,
+        maxBufferHole: 0.5,
+        nudgeOffset: 0.25,
+        nudgeMaxRetry: 6,
         manifestLoadingTimeOut: 20000,
-        manifestLoadingMaxRetry: 3,
-        fragLoadingMaxRetry: 4,
+        manifestLoadingMaxRetry: 4,
+        fragLoadingTimeOut: 25000,
+        fragLoadingMaxRetry: 6,
+        fragLoadingRetryDelay: 400,
       });
       hlsRef.current = hls;
       observeHls(hls, trace);
@@ -122,10 +148,32 @@ const VideoSurface = forwardRef<VideoHandle, Props>(function VideoSurface(
         if (activity.isActive()) hls.startLoad();
         if (autoPlay) activity.play("manifest_autoplay", true);
       });
+      hls.on(Hls.Events.FRAG_BUFFERED, () => { recoverCountRef.current = 0; });
       hls.on(Hls.Events.ERROR, (_e, data) => {
-        if (!data.fatal) return;
-        onError?.(`${data.type}/${data.details}`);
+        if (!data.fatal) {
+          if (
+            data.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR ||
+            data.details === Hls.ErrorDetails.FRAG_LOAD_ERROR
+          ) {
+            try { hls.startLoad(video.currentTime || -1); } catch { /* ignore */ }
+          }
+          return;
+        }
         if (!activity.isActive()) return;
+        const retry = () => {
+          recoverCountRef.current += 1;
+          const delay = 250 * recoverCountRef.current;
+          if (recoverTimerRef.current) window.clearTimeout(recoverTimerRef.current);
+          recoverTimerRef.current = window.setTimeout(() => {
+            try {
+              if (data.type === Hls.ErrorTypes.NETWORK_ERROR) hls.startLoad(video.currentTime || -1);
+              else hls.recoverMediaError();
+            } catch { /* ignore */ }
+          }, delay);
+        };
+        if (data.type === Hls.ErrorTypes.NETWORK_ERROR && recoverCountRef.current < 4) { retry(); return; }
+        if (data.type === Hls.ErrorTypes.MEDIA_ERROR && recoverCountRef.current < 4) { retry(); return; }
+        onError?.(`${data.type}/${data.details}`);
         if (data.type === Hls.ErrorTypes.NETWORK_ERROR) hls.startLoad();
         else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError();
         else { hls.destroy(); hlsRef.current = null; }
@@ -136,11 +184,19 @@ const VideoSurface = forwardRef<VideoHandle, Props>(function VideoSurface(
     }
 
     return () => {
+      video.removeEventListener("resize", onVideoResize);
+      if (recoverTimerRef.current) { window.clearTimeout(recoverTimerRef.current); recoverTimerRef.current = null; }
       trace("source.cleanup");
       if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [src]);
+
+  // iOS 内联播放：部分 WKWebView 只认 HTML 属性
+  useEffect(() => {
+    const v = videoRef.current;
+    if (v) v.setAttribute("webkit-playsinline", "true");
+  }, []);
 
   useEffect(() => { if (videoRef.current) videoRef.current.muted = muted; }, [muted]);
   useEffect(() => { if (videoRef.current) videoRef.current.volume = volume; }, [volume]);
@@ -162,23 +218,42 @@ const VideoSurface = forwardRef<VideoHandle, Props>(function VideoSurface(
       ref={videoRef}
       poster={poster}
       playsInline
+      preload="auto"
       muted={muted}
       loop={loop}
       onClick={onClick}
       className={`w-full h-full bg-black ${fit === "cover" ? "object-cover" : "object-contain"} ${className}`}
       style={{ opacity: ready ? 1 : 0, transition: "opacity .35s" }}
-      onLoadedData={(e) => { setReady(true); reapply(e.target as HTMLVideoElement); }}
-      onTimeUpdate={(e) => onTime?.((e.target as HTMLVideoElement).currentTime)}
+      onLoadedData={(e) => {
+        const v = e.target as HTMLVideoElement;
+        setReady(true);
+        reapply(v);
+        reportSize(v);
+      }}
+      onTimeUpdate={(e) => {
+        const v = e.target as HTMLVideoElement;
+        reportSize(v);
+        onTime?.(v.currentTime);
+        // iOS 有时不触发 ended：靠近片尾自己补一次，保证自动连播
+        const d = v.duration;
+        if (d && Number.isFinite(d) && v.currentTime > d - 0.3 && !nearEndFiredRef.current) {
+          nearEndFiredRef.current = true;
+          onEnded?.();
+        }
+      }}
       onLoadedMetadata={(e) => {
         const v = e.target as HTMLVideoElement;
         reapply(v);
         onDuration?.(v.duration || 0);
-        onSize?.(v.videoWidth || 0, v.videoHeight || 0);
+        reportSize(v);
       }}
       onPlay={() => { if (activity.isActive()) onPlaying?.(); }}
       onPause={() => onPause?.()}
       onWaiting={() => onWaiting?.()}
-      onPlaying={() => { if (activity.isActive()) onPlaying?.(); }}
+      onPlaying={(e) => {
+        reportSize(e.target as HTMLVideoElement);
+        if (activity.isActive()) onPlaying?.();
+      }}
       onEnded={() => { if (activity.isActive()) onEnded?.(); }}
       onError={handleVideoError}
     />

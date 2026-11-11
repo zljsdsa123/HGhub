@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { fmtTime } from "../api";
 import { useSeekInput } from "../useSeekInput";
-import { ICheck, ICompress, IExpand, ILockF, INext, IPauseF, IPip, IPlayF, ITheater, IVol, IVolMute } from "../icons";
+import { ICheck, ICompress, IExpand, ILockF, INext, IPauseF, IPip, IPlayF, ITheater, IVertSwap, IVol, IVolMute } from "../icons";
 
 type Props = {
   paused: boolean;
@@ -18,6 +18,7 @@ type Props = {
   seekKey?: string;
   nextDisabled?: boolean;
   nextTitle?: string;
+  swipeEp?: boolean;
   onToggle: () => void;
   onSeek: (t: number, source?: string) => void;
   onSeekInteraction?: (phase: string, input: string, target: number, pointerTarget?: number) => void;
@@ -29,13 +30,14 @@ type Props = {
   onTheater?: () => void;
   onFullscreen: () => void;
   onNext?: () => void;
+  onToggleSwipe?: () => void;
 };
 
 const clock = (s: number) => fmtTime(Math.max(0, s || 0)).padStart(5, "0");
 
 export default function PlayerControls({
   paused, time, duration, buffered = 0, rate, muted, volume, theater = false, fullscreen = false,
-  visible = true, seekEnabled = true, seekKey, nextDisabled = false, nextTitle = "下一个", onToggle, onSeek, onSeekInteraction, onRate, onMute, onVolume, onPip, onLock, onTheater, onFullscreen, onNext,
+  visible = true, seekEnabled = true, seekKey, nextDisabled = false, nextTitle = "下一个", swipeEp = false, onToggle, onSeek, onSeekInteraction, onRate, onMute, onVolume, onPip, onLock, onTheater, onFullscreen, onNext, onToggleSwipe,
 }: Props) {
   const [speedOpen, setSpeedOpen] = useState(false);
   const boxRef = useRef<HTMLDivElement>(null);
@@ -68,6 +70,12 @@ export default function PlayerControls({
         {onNext && (
           <button className="player-control" aria-label={nextTitle} data-tooltip={nextTitle} disabled={nextDisabled} onClick={onNext}>
             <INext size={18} strokeWidth={1.7} />
+          </button>
+        )}
+        {onToggleSwipe && (
+          <button className={`player-control ${swipeEp ? "is-on" : ""}`} aria-label="上下划切集" aria-pressed={swipeEp}
+            data-tooltip={swipeEp ? "上下划切集：开" : "上下划切集：关"} onClick={onToggleSwipe}>
+            <IVertSwap size={19} strokeWidth={1.7} />
           </button>
         )}
         <span className="player-timecode"><span>{clock(seek.time)}</span><span className="player-time-separator">/</span>{clock(duration)}</span>

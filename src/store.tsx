@@ -27,7 +27,13 @@ export type Page =
   | { kind: "ranks"; key: string }
   | { kind: "settings"; key: string }
   | { kind: "posts"; key: string }
-  | { kind: "post"; key: string; id: number };
+  | { kind: "post"; key: string; id: number }
+  | { kind: "topics"; key: string }
+  | { kind: "topic"; key: string; slug: string; name: string }
+  | { kind: "tags"; key: string }
+  | { kind: "tag"; key: string; tag: string; name: string }
+  | { kind: "following"; key: string }
+  | { kind: "user"; key: string; id: number; name?: string };
 
 export type PageInput =
   | { kind: "feed"; videoIds: number[]; index: number; title: string; source?: string; feedKind?: "video" | "post"; startEp?: number; startTime?: number }
@@ -35,7 +41,13 @@ export type PageInput =
   | { kind: "ranks" }
   | { kind: "settings" }
   | { kind: "posts" }
-  | { kind: "post"; id: number };
+  | { kind: "post"; id: number }
+  | { kind: "topics" }
+  | { kind: "topic"; slug: string; name: string }
+  | { kind: "tags" }
+  | { kind: "tag"; tag: string; name: string }
+  | { kind: "following" }
+  | { kind: "user"; id: number; name?: string };
 
 export type Toast = {
   id: number;
@@ -59,12 +71,14 @@ type Persist = {
   searchHist: string[];
   /** 上下划切集：多集短剧上下滑就换集，而不是换下一部 */
   swipeEp: boolean;
+  /** 优先高清：有 HEVC 就用 HEVC，播不了自动回退标准 */
+  preferHevc: boolean;
 };
 
 const LS = "hghub_app_v1";
 const DEFAULTS: Persist = {
   likes: [], favs: [], history: [], follows: [],
-  muted: true, muteOnStartup: true, volume: 0.7, searchHist: [], swipeEp: false,
+  muted: true, muteOnStartup: true, volume: 0.7, searchHist: [], swipeEp: true, preferHevc: false,
 };
 
 /** 旧版本 history 是 number[]，读出来时升级成带进度的结构 */
@@ -91,7 +105,16 @@ function loadPersist(): Persist {
     const p = { ...DEFAULTS, ...(JSON.parse(raw) as Partial<Persist>) };
     // 只在启动时应用；本次使用中取消静音不会关闭此偏好。
     const muteOnStartup = p.muteOnStartup !== false;
-    return { ...p, muteOnStartup, muted: muteOnStartup || p.muted === true, history: normalizeHistory(p.history) };
+    /* 1.2.9 起上下划默认就是切集。老配置里 swipeEp 存的 false 是当年的默认值，
+       不是用户主动关的，所以这里做一次性迁移；用户之后自己关掉不会再被改回来。 */
+    let swipeEp = p.swipeEp !== false;
+    try {
+      if (localStorage.getItem("hghub_swipe_ep_v2") !== "1") {
+        swipeEp = true;
+        localStorage.setItem("hghub_swipe_ep_v2", "1");
+      }
+    } catch { /* ignore */ }
+    return { ...p, swipeEp, muteOnStartup, muted: muteOnStartup || p.muted === true, history: normalizeHistory(p.history) };
   } catch {
     return DEFAULTS;
   }
@@ -128,9 +151,12 @@ type Store = {
   toggleFollowLocal: (uid: number) => boolean;
   theater: boolean; setTheater: (v: boolean | ((p: boolean) => boolean)) => void;
   fs: boolean; setFs: (v: boolean | ((p: boolean) => boolean)) => void;
+  /** 移动端「净屏」：只留画面，UI 全隐 */
+  clean: boolean; setClean: (v: boolean | ((p: boolean) => boolean)) => void;
   muted: boolean; setMuted: (v: boolean | ((p: boolean) => boolean)) => void;
   muteOnStartup: boolean; setMuteOnStartup: (on: boolean) => void;
   swipeEp: boolean; setSwipeEp: (on: boolean) => void;
+  preferHevc: boolean; setPreferHevc: (on: boolean) => void;
   volume: number; setVolume: (v: number) => void;
   searchHist: string[]; addSearch: (q: string) => void; clearSearchHist: () => void;
   strictSecurity: boolean; strictSecurityReady: boolean; securityPending: boolean; cliRelaxed: boolean; setStrictSecurity: (on: boolean) => Promise<void>;
@@ -154,6 +180,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [lineEpoch, setLineEpoch] = useState(0);
   const [theater, setTheaterState] = useState(false);
   const [fs, setFsState] = useState(false);
+  const [clean, setCleanState] = useState(false);
   const [strictSecurity, setStrictSecurityState] = useState<boolean>(isStrictSecurity);
   const [cliRelaxed, setCliRelaxed] = useState(false);
   const [strictSecurityReady, setStrictSecurityReady] = useState(false);
@@ -211,6 +238,25 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     };
     window.addEventListener("hg:line", onLine);
     return () => window.removeEventListener("hg:line", onLine);
+  }, []);
+  /** 自动选线：主站和发布页上的镜像全都不通。
+   *
+   * 只说一次（60s 节流）——巡检本身 10s 一轮，不节流会一直弹。
+   * 以前这种情况会悄悄切到 `.ai`（接口全 404），用户只看到「加载失败」，
+   * 根本不知道是网络的事。
+   */
+  useEffect(() => {
+    let last = 0;
+    const onDown = () => {
+      const now = Date.now();
+      if (now - last < 60_000) return;
+      last = now;
+      const id = ++toastSeq.current;
+      setToasts((t) => [...t.slice(-2), { id, msg: "线路全部不可用，请检查网络或代理", icon: "info" }]);
+      window.setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 3600);
+    };
+    window.addEventListener("hg:line-down", onDown);
+    return () => window.removeEventListener("hg:line-down", onDown);
   }, []);
   /** 线路真的换了（自动、手切都算）：
    *
@@ -288,6 +334,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   const setFs = useCallback((v: boolean | ((prev: boolean) => boolean)) => {
     setFsState((prev) => (typeof v === "function" ? (v as (p: boolean) => boolean)(prev) : v));
+    // 进出全屏/净屏时把「净屏」收掉，避免退出后 UI 还藏着
+    setCleanState(false);
+  }, []);
+
+  const setClean = useCallback((v: boolean | ((prev: boolean) => boolean)) => {
+    setCleanState((prev) => (typeof v === "function" ? (v as (p: boolean) => boolean)(prev) : v));
   }, []);
 
   const setMuted = useCallback((v: boolean | ((prev: boolean) => boolean)) => {
@@ -298,6 +350,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, []);
   const setSwipeEp = useCallback((on: boolean) => {
     setP((s) => ({ ...s, swipeEp: on }));
+  }, []);
+  const setPreferHevc = useCallback((on: boolean) => {
+    setP((s) => ({ ...s, preferHevc: on }));
   }, []);
   const setVolume = useCallback((v: number) => {
     const volume = Math.max(0, Math.min(1, v));
@@ -313,16 +368,17 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     isLiked: (id) => p.likes.includes(id),
     isFav: (id) => p.favs.includes(id),
     toggleLikeLocal, toggleFavLocal, toggleFollowLocal, addHistory, clearHistory,
-    muted: p.muted, setMuted, volume: p.volume, setVolume, theater, setTheater, fs, setFs,
+    muted: p.muted, setMuted, volume: p.volume, setVolume, theater, setTheater, fs, setFs, clean, setClean,
     muteOnStartup: p.muteOnStartup, setMuteOnStartup,
     swipeEp: p.swipeEp, setSwipeEp,
+    preferHevc: p.preferHevc, setPreferHevc,
     searchHist: p.searchHist, addSearch, clearSearchHist,
     strictSecurity, strictSecurityReady, securityPending, cliRelaxed, setStrictSecurity,
     toasts, toast, lineEpoch,
   }), [theme, tab, setTab, stack, push, pop, user, loginOpen, logout,
     p, toggleLikeLocal, toggleFavLocal, toggleFollowLocal, addHistory, clearHistory,
-    setMuted, setMuteOnStartup, setSwipeEp, setVolume, addSearch, clearSearchHist, strictSecurity, strictSecurityReady, securityPending, cliRelaxed, setStrictSecurity,
-    toasts, toast, lineEpoch, theater, setTheater, fs, setFs]);
+    setMuted, setMuteOnStartup, setSwipeEp, setPreferHevc, setVolume, addSearch, clearSearchHist, strictSecurity, strictSecurityReady, securityPending, cliRelaxed, setStrictSecurity,
+    toasts, toast, lineEpoch, theater, setTheater, fs, setFs, clean, setClean]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }

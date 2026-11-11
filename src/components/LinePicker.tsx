@@ -1,5 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { api, hostOf, isMobile, type LineItem, type LineProbe, type LineState } from "../api";
+import { tracePlayback } from "../playbackDiagnostics";
 import { useStore } from "../store";
 import { Modal, Sheet } from "./ui";
 import { ICheck, IClose, IRefresh, ISettings } from "../icons";
@@ -102,12 +103,14 @@ export default function LinePicker({ open, onClose }: { open: boolean; onClose: 
     setSwitching(url);
     try {
       const next = await api.lineSet(url);
+      tracePlayback("line.manual", { line: hostOf(next), prev: hostOf(state?.base ?? ""), ok: true });
       if (next !== state?.base) setUser(null);
       setState((s) => (s ? { ...s, base: next } : s));
       toast(`线路已切换到 ${hostOf(next)}，跨站点需重新登录`, "ok");
       // 走的是新域名了，列表页得重新拉一遍，否则还是旧线路的内容
       window.dispatchEvent(new Event("hg:line-changed"));
     } catch (e) {
+      tracePlayback("line.manual", { line: hostOf(url), ok: false, err: (e as Error).message });
       toast((e as Error).message || "切换失败", "info");
     } finally {
       setSwitching("");

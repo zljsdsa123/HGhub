@@ -75,10 +75,10 @@ pub fn fixed() -> Value {
 
 /// 拉地址发布页 → 解析 publish.js → 拼出镜像地址。只在用户点开「线路」时调用。
 pub async fn mirrors() -> Result<Value, String> {
-    let html = get_text(PUBLISH_PAGE).await?;
+    let html = get_text_within(PUBLISH_PAGE, PAGE_TIMEOUT).await?;
     let js_rel = script_src(&html).unwrap_or_else(|| "publish.js".to_string());
     let js_url = absolute(PUBLISH_PAGE, &js_rel);
-    let js = get_text(&js_url).await?;
+    let js = get_text_within(&js_url, PAGE_TIMEOUT).await?;
 
     let domains = js_array(&js, "var urls");
     let subs = js_array(&js, "var subdomains");
@@ -113,7 +113,10 @@ pub async fn mirrors() -> Result<Value, String> {
         return Err("地址发布页里没有可用的镜像地址".to_string());
     }
 
-    let mut recommended = recommend().await;
+    let mut recommended = match tokio::time::timeout(RECOMMEND_TIMEOUT, recommend()).await {
+        Ok(list) => list,
+        Err(_) => Vec::new(),
+    };
     // 发布页每次给的子域都不一样（服务端随机拼），自动选线选中的那条
     // 往往不在这一批里。把当前线路补到最前面，用户一眼能看到「我正走这条」。
     let current = crate::net::base();
@@ -224,16 +227,20 @@ async fn probe_one(url: String) -> Value {
 
 /* ───────────────────────── 自动选线 ───────────────────────── */
 
-/// 自动选线的两条候选：主站 `.com` 与国内 `.ai`。
-/// 国内基本连不上 `.com`，海外 `.ai` 一定比 `.com` 慢，所以两条各打一下就够。
-pub const AUTO_LINES: [(&str, &str); 2] = [
-    ("main", crate::net::DEFAULT_BASE),
-    ("cn", "https://huangguoai.ai"),
-];
+/// 自动选线的主站候选。
+///
+/// 国内基本连不上 `.com`，不通时用推荐页上挂的镜像（见 [`auto_pick`]）。
+/// `.ai` 不再是候选：它只是落地页，`/api` 全 404，切过去用户看到的是
+/// 「首页能开、内容全空」，比明确报错更难排查。
+pub const AUTO_LINES: [(&str, &str); 1] = [("main", crate::net::DEFAULT_BASE)];
 /// 判活就打这一个请求，成本等于 ping：能返回 200 就是这条线路能用。
 const AUTO_PROBE_PATH: &str = "/api/videos?page=1&size=1";
 /// 探测超时：只在启动/换网时用，等太久不如直接用另一条。
 const AUTO_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+/// 抓「推荐页」的上限：连推荐页都打不开时，选线要能快速给结论，不能拖十几秒。
+const RECOMMEND_TIMEOUT: Duration = Duration::from_secs(6);
+/// 抓地址发布页 / publish.js 的上限：用户点开「线路」面板时就在这等。
+const PAGE_TIMEOUT: Duration = Duration::from_secs(8);
 /// 镜像最多探这么多条，够挑出快的了
 const AUTO_MIRROR_MAX: usize = 10;
 
@@ -290,13 +297,16 @@ async fn probe_hit(tier: &'static str, url: &str) -> Hit {
     }
 }
 
-/// 自动选线：只 ping 主站。通了就用 `.com`，不通用 `.ai`。
+/// 自动选线：ping 一次主站，不通就用推荐页上挂的镜像。
 ///
 /// ping = 一次 `GET /api/videos?page=1&size=1`，成本跟 ICMP 差不多。
 /// 只看首页不够：`.ai` 首页 200，但它只是落地页，`/api` 全 404。
+///
+/// 主站和镜像全都不通时返回 `reason = "all-down"` 且 `base` 为空 —— **不切线路**。
+/// 以前这里会盲切到 `.ai`（`ms = 0`），用户看到的是「首页能开、内容全空」，
+/// 比直接提示「线路全部不可用」更难排查。
 pub async fn auto_pick() -> Value {
     let (main_tier, main_url) = AUTO_LINES[0];
-    let (cn_tier, cn_url) = AUTO_LINES[1];
 
     let main_hit = probe_hit(main_tier, main_url).await;
     if main_hit.ok {
@@ -309,9 +319,13 @@ pub async fn auto_pick() -> Value {
         });
     }
 
-    // 主站不通（国内）。`.ai` 只是落地页，`/api` 全 404，所以用它页面上挂的镜像。
-    let mut urls: Vec<String> = recommend()
-        .await
+    // 主站不通（国内）：用它推荐页上挂的镜像。推荐页自己也可能是超时的，
+    // 给个上限，别让一次选线拖十几秒还没结论。
+    let mirrors = match tokio::time::timeout(RECOMMEND_TIMEOUT, recommend()).await {
+        Ok(list) => list,
+        Err(_) => Vec::new(),
+    };
+    let mut urls: Vec<String> = mirrors
         .iter()
         .filter_map(|v| v.get("url").and_then(Value::as_str).map(str::to_string))
         .take(AUTO_MIRROR_MAX)
@@ -338,13 +352,12 @@ pub async fn auto_pick() -> Value {
             "candidates": candidates,
         });
     }
-    // 镜像也全不通：退回 `.ai`，首页还能开（接口会 404），总比卡在死链路上好
-    let (cn_tier, cn_url) = AUTO_LINES[1];
+    // 全都不通：保持当前线路不动，把「全都不可用」这个结论交给前端提示。
     json!({
-        "base": cn_url,
-        "tier": cn_tier,
+        "base": "",
+        "tier": "",
         "ms": 0,
-        "reason": "ai-only",
+        "reason": "all-down",
         "candidates": candidates,
     })
 }
@@ -384,6 +397,15 @@ async fn get_text(url: &str) -> Result<String, String> {
         return Err(format!("HTTP {}", resp.status()));
     }
     resp.text().await.map_err(|e| crate::net::err_text(&e))
+}
+
+/// 带超时的 [`get_text`]：12 秒对外面页面太宽容了——用户点开「线路」面板时
+/// 就在这一步等着，页面挂掉会让人以为整个应用卡死。
+async fn get_text_within(url: &str, limit: Duration) -> Result<String, String> {
+    match tokio::time::timeout(limit, get_text(url)).await {
+        Ok(r) => r,
+        Err(_) => Err("请求超时".to_string()),
+    }
 }
 
 /// 从 HTML 里挑出脚本地址（发布页只有一个 `publish.js?<版本>`）。

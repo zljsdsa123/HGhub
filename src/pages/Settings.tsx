@@ -4,13 +4,14 @@ import { useStore } from "../store";
 import { Modal, Toggle } from "../components/ui";
 import LinePicker from "../components/LinePicker";
 import { autoLineEnabled, pickLine, setAutoLine } from "../autoLine";
-import { copyPlaybackLog, initPlaybackLog, setPlaybackLog, usePlaybackLog } from "../playbackDiagnostics";
+import { copyPlaybackLog, initPlaybackLog, setPlaybackLog, tracePlayback, usePlaybackLog } from "../playbackDiagnostics";
+import { formatNetDiag, shortVerdict } from "../netDiagReport";
 import { IBack, IBoltF, IBroom, IChevR, IHeart, IInfo, ILink, ILockF, IMoon, IRefresh, ISettings, ISun, IVolMute, IList } from "../icons";
 
 /* 独立设置页：线路 / 外观 / 播放 / 本地数据 / 清理缓存 / 网络诊断 / 关于
    入口：Windows 侧栏「设置」、Android「我的」右上角齿轮 */
 export default function Settings({ onBack, wide }: { onBack: () => void; wide: boolean }) {
-  const { theme, setTheme, favs, history, muteOnStartup, setMuteOnStartup, swipeEp, setSwipeEp, strictSecurity, strictSecurityReady, securityPending, cliRelaxed, setStrictSecurity, toast } = useStore();
+  const { theme, setTheme, favs, history, muteOnStartup, setMuteOnStartup, swipeEp, setSwipeEp, preferHevc, setPreferHevc, strictSecurity, strictSecurityReady, securityPending, cliRelaxed, setStrictSecurity, toast } = useStore();
   const [about, setAbout] = useState(false);
   const [clearOpen, setClearOpen] = useState(false);
   const [clearing, setClearing] = useState(false);
@@ -42,25 +43,20 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
       setChecking(false);
     }
   };
-  /** 应用内更新：下载安装包 → 交给系统安装器。
+  /** 更新：用系统浏览器打开下载页，由系统/浏览器完成下载与安装。
    *
-   * 加速源在后端处理（直连 GitHub 拉不动时自动换），前端只等结果。
+   * 不再自己下载 APK 并调安装器 —— 那条路在安卓上要额外过 FileProvider
+   * 与「安装未知应用」授权，失败点多，体验并不比浏览器好。
    */
   const doUpdate = async () => {
     if (!update) return;
-    if (!update.asset) {
-      api.openUrl(update.url).catch(() => {});
-      return;
-    }
-    setUpdating("下载中…");
+    setUpdating("打开中…");
     try {
-      const path = await api.downloadUpdate(update.asset.url, update.asset.name);
-      setUpdating("调起安装器…");
-      await api.installUpdate(path);
-      setUpdate(null);
-      toast("下载完成，按系统提示安装即可", "ok");
+      await api.openUrl(update.url);
     } catch (e) {
-      toast((e as Error).message || "更新失败", "info");
+      navigator.clipboard?.writeText(update.url)
+        .then(() => toast("下载地址已复制，可在浏览器粘贴打开", "ok"))
+        .catch(() => toast((e as Error).message || "打开失败", "info"));
     } finally {
       setUpdating("");
     }
@@ -120,6 +116,14 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
                 <div className="text-[10.5px] text-mut">多集短剧上下滑换集，划到头再换下一部</div>
               </div>
               <Toggle on={swipeEp} onChange={setSwipeEp} label="上下划切集" />
+            </div>
+            <div className="flex items-center gap-3 px-3.5 py-3">
+              <span className="w-8 h-8 rounded-full bg-s3 flex items-center justify-center text-primary"><IBoltF size={16} /></span>
+              <div className="flex-1 min-w-0">
+                <div className="text-[12.5px] text-on">优先高清</div>
+                <div className="text-[10.5px] text-mut">有高清就用 HEVC，播不了会自动切回标准</div>
+              </div>
+              <Toggle on={preferHevc} onChange={setPreferHevc} label="优先高清" />
             </div>
           </Section>
 
@@ -189,10 +193,20 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
             {/* 打不开时先点这里：把 DNS / 代理 / HTTP 结果复制给维护者 */}
             <button onClick={async () => {
               try {
-                const text = JSON.stringify(await api.netDiag(), null, 2);
-                logLine(`[net_diag] ${text}`);
-                await navigator.clipboard?.writeText(text);
-                toast("网络诊断结果已复制", "ok");
+                const diag = await api.netDiag();
+                // 落盘走原始 JSON（便于脚本统计），复制给对方的是分段可读报告。
+                logLine(`[net_diag] ${JSON.stringify(diag)}`);
+                const http = (diag.http ?? {}) as { ms?: number; status?: number };
+                const dns = (diag.dns ?? {}) as { count?: number; has_fake_ip?: boolean };
+                const env = (diag.env ?? {}) as Record<string, unknown>;
+                tracePlayback("net.diag", {
+                  verdict: String(diag.verdict ?? ""),
+                  host: hostOf(String(diag.host ?? "")), http_status: http.status ?? null, http_ms: http.ms ?? null,
+                  dns_count: dns.count ?? null, fake_ip: dns.has_fake_ip ?? null,
+                  proxy: Object.values(env).some(Boolean), strict: strictSecurity,
+                });
+                await navigator.clipboard?.writeText(formatNetDiag(diag));
+                toast(`诊断已复制 · ${shortVerdict(diag)}`, "ok");
               } catch (e) {
                 toast((e as Error).message || "诊断失败", "info");
               }
@@ -200,7 +214,7 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
               <span className="w-8 h-8 rounded-full bg-s3 flex items-center justify-center text-primary"><ILink size={16} /></span>
               <div className="flex-1">
                 <div className="text-[12.5px] text-on">网络诊断</div>
-                <div className="text-[10.5px] text-mut">检测 DNS / 系统代理 / 官网连通性</div>
+                <div className="text-[10.5px] text-mut">DNS / TCP / 系统代理 / 官网连通性，一键复制带结论的报告</div>
               </div>
               <IChevR size={15} className="text-mut" />
             </button>
@@ -278,10 +292,10 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
           </div>
 
           <div className="mt-4 divide-y divide-s3">
-            <button onClick={() => { navigator.clipboard?.writeText("https://github.com/Minireel/HGhub").then(() => toast("仓库地址已复制", "ok")).catch(() => {}); }}
+            <button onClick={() => { api.openUrl("https://github.com/zxsos/HGhub").catch(() => { navigator.clipboard?.writeText("https://github.com/zxsos/HGhub").then(() => toast("仓库地址已复制", "ok")).catch(() => {}); }); }}
               className="w-full flex items-center gap-2 py-2.5 text-left pressable">
               <ILink size={15} className="text-mut" />
-              <span className="text-[12px] text-on/85">github.com/Minireel/HGhub</span>
+              <span className="text-[12px] text-on/85">github.com/zxsos/HGhub</span>
               <span className="ml-auto text-[10.5px] text-primary">复制</span>
             </button>
             <button onClick={() => { navigator.clipboard?.writeText("https://huangguoai.com").then(() => toast("站点地址已复制", "ok")).catch(() => {}); }}
@@ -337,17 +351,9 @@ export default function Settings({ onBack, wide }: { onBack: () => void; wide: b
               className="flex-1 h-9 rounded-(--r-ctl) bg-s3 text-[12.5px] text-on/80 pressable disabled:opacity-60">稍后</button>
             <button onClick={() => void doUpdate()} disabled={!!updating}
               className="flex-1 h-9 rounded-(--r-ctl) bg-primary text-[12.5px] font-semibold text-on-primary pressable disabled:opacity-60">
-              {updating || (update?.asset ? "立即更新" : "前往下载")}
+              {updating || "前往下载"}
             </button>
           </div>
-          {!!update?.asset && (
-            <button onClick={() => {
-              if (!update) return;
-              api.openUrl(update.url).catch(() => {
-                navigator.clipboard?.writeText(update.url).then(() => toast("下载地址已复制", "ok")).catch(() => {});
-              });
-            }} className="w-full h-9 mt-2 rounded-(--r-ctl) bg-s3 text-[12px] text-on/80 pressable">浏览器打开</button>
-          )}
           <div className="text-[10px] text-dim mt-2.5 break-all">{update?.url}</div>
         </div>
       </Modal>

@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import Hls from "hls.js";
-import { fmtTime, playlist } from "../api";
+import { fmtTime, platform, playlist } from "../api";
 import { mediaErrorMessage } from "../mediaErrors";
 import { mediaHost, mediaResource, observeHls, usePlayerDiagnostics } from "../playbackDiagnostics";
 import { usePlaybackActivity } from "../usePlaybackActivity";
@@ -31,6 +31,7 @@ export default function Player({
   const videoRef = useRef<HTMLVideoElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const hlsRef = useRef<Hls | null>(null);
+  const recoverCountRef = useRef(0);
   const { trace, requestSeek } = usePlayerDiagnostics(videoRef, hlsRef, { view: "post_detail", ...diagnosticContext, active, resource: mediaResource(src) });
   const activity = usePlaybackActivity(videoRef, hlsRef, { active, autoPlay: !!autoPlay, src, trace });
   const [playing, setPlaying] = useState(false);
@@ -47,6 +48,10 @@ export default function Player({
       const video = videoRef.current;
       if (!video || !activity.isActive()) return;
       requestSeek(target, `legacy_${input}`);
+      setWaiting(true);
+      if (hlsRef.current) {
+        try { hlsRef.current.startLoad(target); } catch { /* ignore */ }
+      }
       video.currentTime = target;
       trace("seek.assigned", { target });
       setTime(video.currentTime);
@@ -58,6 +63,7 @@ export default function Player({
     if (!video || !src) return;
     setErrMsg("");
     setWaiting(false);
+    recoverCountRef.current = 0;
     const url = playlist(src);
     trace("source.load", { engine: Hls.isSupported() ? "hls.js" : "native", auto_play: autoPlay, resource: mediaResource(src), host: mediaHost(src) });
 
@@ -69,16 +75,23 @@ export default function Player({
         interstitialsController: undefined,
         contentSteeringController: undefined,
         enableInterstitialPlayback: false,
-        enableWorker: true,
+        // WKWebView 里 hls.js 的 worker 不稳，iOS 关掉
+        enableWorker: platform !== "ios",
         // Keep the same macOS seek workaround as the shared player.
         preferManagedMediaSource: false,
         autoStartLoad: false,
         lowLatencyMode: false,
-        maxBufferLength: 24,
+        maxBufferLength: 30,
+        maxMaxBufferLength: 60,
         backBufferLength: 30,
+        maxBufferHole: 0.5,
+        nudgeOffset: 0.25,
+        nudgeMaxRetry: 6,
         manifestLoadingTimeOut: 20000,
-        manifestLoadingMaxRetry: 3,
-        fragLoadingMaxRetry: 4,
+        manifestLoadingMaxRetry: 4,
+        fragLoadingTimeOut: 25000,
+        fragLoadingMaxRetry: 6,
+        fragLoadingRetryDelay: 400,
       });
       hlsRef.current = hls;
       observeHls(hls, trace);
@@ -88,8 +101,31 @@ export default function Player({
         if (activity.isActive()) hls.startLoad();
         if (autoPlay) activity.play("manifest_autoplay", true);
       });
+      hls.on(Hls.Events.FRAG_BUFFERED, () => {
+        recoverCountRef.current = 0;
+        setErrMsg("");
+      });
       hls.on(Hls.Events.ERROR, (_e, data) => {
-        if (!data.fatal) return;
+        if (!data.fatal) {
+          if (
+            data.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR ||
+            data.details === Hls.ErrorDetails.FRAG_LOAD_ERROR
+          ) {
+            try { hls.startLoad(video.currentTime || -1); } catch { /* ignore */ }
+          }
+          return;
+        }
+        if (!activity.isActive()) return;
+        if (data.type === Hls.ErrorTypes.NETWORK_ERROR && recoverCountRef.current < 4) {
+          recoverCountRef.current += 1;
+          try { hls.startLoad(video.currentTime || -1); } catch { /* ignore */ }
+          return;
+        }
+        if (data.type === Hls.ErrorTypes.MEDIA_ERROR && recoverCountRef.current < 4) {
+          recoverCountRef.current += 1;
+          try { hls.recoverMediaError(); video.play().catch(() => {}); } catch { /* ignore */ }
+          return;
+        }
         const detail = `${data.type}/${data.details}/${data.response?.code ?? ""}/${String(data.reason ?? "").slice(0, 80)}`;
         (window as unknown as { __hlsErr?: string }).__hlsErr = detail;
         setErrMsg(detail);
@@ -115,6 +151,13 @@ export default function Player({
     if (!video) return;
     video.muted = muted;
   }, [muted]);
+
+  // iOS 内联播放：部分 WKWebView 只认 HTML 属性，不认 React 的 playsInline
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    video.setAttribute("webkit-playsinline", "true");
+  }, []);
 
   useEffect(() => {
     const onFs = () => setFull(!!document.fullscreenElement);
@@ -154,6 +197,7 @@ export default function Player({
         ref={videoRef}
         poster={poster}
         playsInline
+        preload="auto"
         muted={muted}
         loop={loop}
         className="w-full h-full object-contain bg-black"
@@ -161,7 +205,8 @@ export default function Player({
         onPlay={() => { if (activity.isActive()) { setPlaying(true); onTogglePlay?.(true); } }}
         onPause={() => { setPlaying(false); onTogglePlay?.(false); }}
         onWaiting={() => setWaiting(true)}
-        onPlaying={() => { if (activity.isActive()) { setWaiting(false); onPlaying?.(); } }}
+        onPlaying={() => { if (activity.isActive()) { setWaiting(false); setErrMsg(""); onPlaying?.(); } }}
+        onSeeked={() => setWaiting(false)}
         onTimeUpdate={(e) => setTime((e.target as HTMLVideoElement).currentTime)}
         onLoadedMetadata={(e) => setDuration((e.target as HTMLVideoElement).duration || 0)}
         onEnded={() => { if (activity.isActive()) onEnded?.(); }}

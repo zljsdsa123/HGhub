@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
-import { api, fmt } from "../api";
-import type { RankItem, VideoCard } from "../types";
+import { api, fmt, isMobile } from "../api";
+import type { HotWord, RankItem, VideoCard } from "../types";
 import { useStore } from "../store";
 import { Masonry, RankRow } from "../components/cards";
 import { Empty } from "../components/ui";
@@ -19,9 +19,19 @@ export default function Search({ active, wide }: { active: boolean; wide: boolea
   const [err, setErr] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const busy = useRef(false);
+  const [hotWords, setHotWords] = useState<HotWord[]>([]);
 
+  /* 移动端进入搜索页不自动聚焦：iOS 会立刻弹键盘遮住内容（#20）。
+     桌面端没有软键盘，聚焦便于直接打字。 */
   useEffect(() => {
-    if (active && !/Android/i.test(navigator.userAgent)) inputRef.current?.focus();
+    if (active && !isMobile) inputRef.current?.focus();
+  }, [active]);
+
+  const refreshHot = () => {
+    api.searchHot().then((r) => setHotWords(r?.items || [])).catch(() => {});
+  };
+  useEffect(() => {
+    if (active) refreshHot();
   }, [active]);
 
   const run = async (keyword: string, p: number) => {
@@ -79,6 +89,25 @@ export default function Search({ active, wide }: { active: boolean; wide: boolea
       <div className="flex-1 scroll-y px-4 pb-24">
         {!querying ? (
           <>
+            {hotWords.length > 0 && (
+              <div className="mt-1 rounded-(--r-md) bg-s2 p-3.5 a-rise">
+                <div className="flex items-center justify-between">
+                  <span className="flex items-center gap-1.5 text-[13px] font-semibold text-on/90"><IFireF size={15} className="text-primary" />热搜榜</span>
+                  <button onClick={refreshHot} className="flex items-center gap-1 text-[11px] text-mut pressable"><IRefresh size={12} />刷新</button>
+                </div>
+                <div className="grid grid-cols-2 gap-x-3 gap-y-2 mt-3">
+                  {hotWords.slice(0, 10).map((h, i) => (
+                    <button key={h.word} onClick={() => { setQ(h.word); submit(h.word); }}
+                      className="flex items-center gap-2 min-w-0 text-left pressable">
+                      <span className={`w-4.5 h-4.5 shrink-0 rounded-(--r-xs) flex items-center justify-center text-[10.5px] font-bold ${i < 3 ? "bg-primary text-on-primary" : "bg-s3 text-dim"}`}>{i + 1}</span>
+                      <span className="truncate text-[12px] text-on/85 flex-1">{h.word}</span>
+                      <span className="text-[10px] text-dim shrink-0">{fmt(h.heat)}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {searchHist.length > 0 && (
               <div className="mt-1 a-rise">
                 <div className="flex items-center justify-between">
