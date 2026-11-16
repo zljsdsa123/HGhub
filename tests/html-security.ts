@@ -4,7 +4,7 @@ import DOMPurify from "dompurify";
 const fixture = document.querySelector<HTMLDivElement>("#fixture")!;
 const results: { name: string; passed: boolean; error?: string }[] = [];
 const assert = (value: unknown, message: string) => { if (!value) throw new Error(message); };
-const marker = "window.__hghubAudit = 1;void(0)";
+const marker = "window.__hghubxAudit = 1;void(0)";
 setStrictSecurity(true);
 
 async function test(name: string, run: () => void | Promise<void>) {
@@ -29,7 +29,7 @@ const attacks = [
 
 for (const [i, attack] of attacks.entries()) {
   await test(`attack ${i + 1}`, async () => {
-    (window as unknown as { __hghubAudit: number }).__hghubAudit = 0;
+    (window as unknown as { __hghubxAudit: number }).__hghubxAudit = 0;
     fixture.innerHTML = sanitizeHtml(attack);
     assert(!fixture.querySelector("svg,math,script,style,iframe,object,embed,form,input"), "active tag survived");
     for (const el of fixture.querySelectorAll("*")) {
@@ -41,7 +41,7 @@ for (const [i, attack] of attacks.entries()) {
       a.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
     }
     await new Promise(resolve => setTimeout(resolve, 30));
-    assert((window as unknown as { __hghubAudit: number }).__hghubAudit === 0, "script executed");
+    assert((window as unknown as { __hghubxAudit: number }).__hghubxAudit === 0, "script executed");
   });
 }
 
@@ -104,7 +104,7 @@ await test("sanitizeHtml is idempotent and intercepts link clicks", () => {
 await test("relaxed mode fallback keeps XSS protection while relaxing strict host/style rules", () => {
   try {
     setStrictSecurity(false);
-    const out = sanitizeHtml('<p style="color:red"><a href="http://nas.local/item">local</a><script>window.__hghubAudit=1</script><img src=x onerror="window.__hghubAudit=1"></p>');
+    const out = sanitizeHtml('<p style="color:red"><a href="http://nas.local/item">local</a><script>window.__hghubxAudit=1</script><img src=x onerror="window.__hghubxAudit=1"></p>');
     fixture.innerHTML = out;
     assert(!fixture.querySelector("script"), "script survived in relaxed mode");
     assert(fixture.querySelector("p")?.getAttribute("style")?.includes("color"), "style stripped in relaxed mode");
@@ -126,7 +126,7 @@ for (const [i, attack] of attacks.entries()) {
   await test(`relaxed attack ${i + 1}`, async () => {
     setStrictSecurity(false);
     try {
-      (window as unknown as { __hghubAudit: number }).__hghubAudit = 0;
+      (window as unknown as { __hghubxAudit: number }).__hghubxAudit = 0;
       fixture.innerHTML = sanitizeHtml(attack);
       assert(!fixture.querySelector("svg,math,script,iframe,object,embed"), "active tag survived");
       for (const el of fixture.querySelectorAll("*")) {
@@ -136,7 +136,7 @@ for (const [i, attack] of attacks.entries()) {
       }
       for (const a of fixture.querySelectorAll("a")) a.click();
       await new Promise(resolve => setTimeout(resolve, 30));
-      assert((window as unknown as { __hghubAudit: number }).__hghubAudit === 0, "script executed");
+      assert((window as unknown as { __hghubxAudit: number }).__hghubxAudit === 0, "script executed");
     } finally { setStrictSecurity(true); }
   });
 }

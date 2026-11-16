@@ -60,7 +60,7 @@ update("src-tauri/tauri.conf.json", (j) => {
 
 /* Cargo 侧也要跟着走：`check_update` 里的「当前版本」读的是 CARGO_PKG_VERSION，
    只改 package.json 会出现「关于页 1.2.1、更新检查 1.2.0」的错位。 */
-const CARGO_PKG = "huangguo-client";
+const CARGO_PKG = "hghubx";
 
 function setCargoToml(rel) {
   const p = path.join(root, rel);

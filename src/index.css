@@ -1,69 +1,12 @@
-@import "tailwindcss";
+@import "tailwindcss" source(none);
+/* Only shipping UI contributes utilities, not tests, reports or old artifacts. */
+@source "./";
+@source "../index.html";
+@import "./styles/ios.css";
 
 /* ===================================================================
-   与设计稿一致的 Fluent 色板：深色默认，浅色 html.theme-light
+   应用语义色映射：颜色与控件样式由 ios.css 统一维护
    =================================================================== */
-:root {
-  color-scheme: dark;
-  --p-canvas: #1a1a1a;
-  --p-bg: #202020;
-  --p-s1: #272727;
-  --p-s2: #2c2c2c;
-  --p-s3: #343434;
-  --p-s4: #3e3e3e;
-  --p-on: #ffffff;
-  --p-mut: #c5c5c5;
-  --p-dim: #8b8b8b;
-  --p-primary: #60cdff;
-  --p-on-primary: #003042;
-  --p-pc: #1f5a78;
-  --p-on-pc: #cdefff;
-  --p-sec: #383838;
-  --p-on-sec: #ffffff;
-  --p-like: #ff6f8c;
-  --p-star: #e8c250;
-  --p-success: #6ccb5f;
-  --p-danger: #ff99a4;
-  --p-on-danger: #45060f;
-  --p-glow: rgba(96, 205, 255, .28);
-  --p-hover: rgba(255, 255, 255, .08);
-  --p-tint: rgba(96, 205, 255, .14);
-  --p-shadow: 0 28px 88px rgba(0, 0, 0, .45), 0 6px 20px rgba(0, 0, 0, .32);
-  --r-sm: 8px; --r-md: 12px; --r-lg: 16px; --r-ctl: 999px;
-  --nav-h: 64px;
-}
-.plat-windows { --r-sm: 4px; --r-md: 8px; --r-lg: 8px; --r-ctl: 4px; --nav-h: 0px; }
-.plat-macos { --r-sm: 6px; --r-md: 10px; --r-lg: 12px; --r-ctl: 6px; --nav-h: 0px; }
-.plat-linux { --r-sm: 4px; --r-md: 8px; --r-lg: 8px; --r-ctl: 4px; --nav-h: 0px; }
-.plat-ios { --r-sm: 10px; --r-md: 14px; --r-lg: 18px; --r-ctl: 999px; -webkit-touch-callout: none; }
-html.theme-light {
-  color-scheme: light;
-  --p-canvas: #f3f3f3;
-  --p-bg: #f9f9f9;
-  --p-s1: #ffffff;
-  --p-s2: #f3f3f3;
-  --p-s3: #e8e8e8;
-  --p-s4: #dcdcdc;
-  --p-on: #1a1a1a;
-  --p-mut: #5c5c5c;
-  --p-dim: #8a8a8a;
-  --p-primary: #0067c0;
-  --p-on-primary: #ffffff;
-  --p-pc: #cce4f7;
-  --p-on-pc: #003a66;
-  --p-sec: #e5e5e5;
-  --p-on-sec: #1a1a1a;
-  --p-like: #e74856;
-  --p-star: #9a6b00;
-  --p-success: #0f7b0f;
-  --p-danger: #c42b1c;
-  --p-on-danger: #ffffff;
-  --p-glow: rgba(0, 103, 192, .2);
-  --p-hover: rgba(0, 0, 0, .05);
-  --p-tint: rgba(0, 103, 192, .12);
-  --p-shadow: 0 18px 48px rgba(0, 0, 0, .14), 0 2px 8px rgba(0, 0, 0, .06);
-}
-
 @theme inline {
   --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI Variable", "Segoe UI", "Roboto", "PingFang SC", "HarmonyOS Sans SC", "MiSans", "Microsoft YaHei", "Noto Sans SC", "Noto Sans CJK SC", sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji";
   --color-canvas: var(--p-canvas);
@@ -91,6 +34,7 @@ html.theme-light {
   --color-on-danger: var(--p-on-danger);
 }
 
+@layer legacy {
 html, body, #root { height: 100%; height: 100dvh; overflow: hidden; overscroll-behavior: none; }
 body {
   margin: 0;
@@ -103,7 +47,11 @@ body {
   -webkit-user-select: none;
   -webkit-touch-callout: none;
 }
-input, textarea { user-select: text; -webkit-user-select: text; }
+input, textarea, [contenteditable="true"], .select-text, .article-body {
+  user-select: text;
+  -webkit-user-select: text;
+  -webkit-touch-callout: default;
+}
 img, video { -webkit-user-drag: none; }
 button { cursor: pointer; font-family: inherit; }
 
@@ -122,11 +70,18 @@ button { cursor: pointer; font-family: inherit; }
 .elev-1 { box-shadow: 0 1px 2px rgba(0,0,0,.16), 0 4px 12px rgba(0,0,0,.1); }
 .elev-2 { box-shadow: 0 2px 6px rgba(0,0,0,.16), 0 10px 24px rgba(0,0,0,.12); }
 .elev-3 { box-shadow: 0 8px 28px rgba(0,0,0,.18); }
-.elev-up { box-shadow: 0 -4px 16px rgba(0,0,0,.12); }
 html.theme-light .elev-1 { box-shadow: 0 1px 2px rgba(0,0,0,.05), 0 4px 12px rgba(0,0,0,.04); }
 html.theme-light .elev-2 { box-shadow: 0 2px 8px rgba(0,0,0,.07); }
 html.theme-light .elev-3 { box-shadow: 0 10px 30px rgba(0,0,0,.1); }
-.glow-neon, .glow-cyan { box-shadow: 0 4px 18px var(--p-glow); }
+html.theme-light .spinner { border-color: rgba(43,40,36,.14); border-top-color: var(--p-primary); }
+html.theme-light input[type="range"].hg-range::-webkit-slider-runnable-track {
+  background: linear-gradient(to right, var(--p-primary) var(--fill,0%), rgba(43,40,36,.18) var(--fill,0%));
+}
+html.theme-light input[type="range"].hg-range::-webkit-slider-thumb {
+  background: var(--p-s1);
+  box-shadow: 0 0 0 1px rgba(43,40,36,.12), 0 0 10px var(--p-glow);
+}
+.glow-neon { box-shadow: 0 4px 18px var(--p-glow); }
 .tsh { text-shadow: 0 1px 10px rgba(0,0,0,.6); }
 .pressable { transition: transform .16s cubic-bezier(.2,0,0,1), opacity .16s, background-color .16s, color .16s; }
 .pressable:active { transform: scale(.94); }
@@ -136,7 +91,6 @@ html.theme-light .elev-3 { box-shadow: 0 10px 30px rgba(0,0,0,.1); }
 .clamp-3 { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
 
 .brand-grad { background: var(--p-primary); color: var(--p-on-primary); }
-.brand-text { color: var(--p-primary); }
 .tonal { background: var(--p-sec); color: var(--p-on-sec); }
 
 /* ——— 动画 ——— */
@@ -146,28 +100,15 @@ html.theme-light .elev-3 { box-shadow: 0 10px 30px rgba(0,0,0,.1); }
 .a-fade { animation: kf-fade .2s ease both; }
 @keyframes kf-rise { from{opacity:0;transform:translateY(14px)} to{opacity:1;transform:translateY(0)} }
 .a-rise { animation: kf-rise .38s cubic-bezier(.2,0,0,1) both; }
-@keyframes kf-sheet { from{transform:translateY(100%)} to{transform:translateY(0)} }
-.a-sheet { animation: kf-sheet .32s cubic-bezier(.2,0,0,1) both; }
-@keyframes kf-sheet-out { from{transform:translateY(0)} to{transform:translateY(100%)} }
-.a-sheet-out { animation: kf-sheet-out .2s cubic-bezier(.3,0,.8,.15) both; }
-@keyframes kf-panel-in { from{transform:translateX(100%)} to{transform:translateX(0)} }
-.a-panel-in { animation: kf-panel-in .28s cubic-bezier(.2,0,0,1) both; }
-@keyframes kf-panel-out { from{transform:translateX(0)} to{transform:translateX(100%)} }
-.a-panel-out { animation: kf-panel-out .2s ease-in both; }
 @keyframes kf-scale-in { from{opacity:0;transform:scale(.92)} to{opacity:1;transform:scale(1)} }
-.a-scale-in { animation: kf-scale-in .22s cubic-bezier(.2,0,0,1) both; }
 @keyframes kf-page-in { from{transform:translateX(100%)} to{transform:none} }
 .a-page-in { animation: kf-page-in .3s cubic-bezier(.2,0,0,1) both; }
 @keyframes kf-page-out { from{transform:translateX(0)} to{transform:translateX(100%)} }
 .a-page-out { animation: kf-page-out .22s cubic-bezier(.3,0,.8,.15) both; }
-@keyframes kf-shimmer { 0%{background-position:-400px 0} 100%{background-position:400px 0} }
-.shimmer { background: linear-gradient(90deg, var(--p-s1) 25%, var(--p-s3) 50%, var(--p-s1) 75%); background-size: 800px 100%; animation: kf-shimmer 1.4s linear infinite; }
+.shimmer { background: linear-gradient(110deg, var(--p-s1) 0%, var(--p-s3) 50%, var(--p-s1) 100%); }
 @keyframes kf-spin { to{transform:rotate(360deg)} }
-.a-spin-slow { animation: kf-spin 6s linear infinite; }
 @keyframes kf-toast { from{opacity:0;transform:translateY(12px) scale(.96)} to{opacity:1;transform:translateY(0) scale(1)} }
 .a-toast { animation: kf-toast .26s cubic-bezier(.2,0,0,1) both; }
-@keyframes kf-kenburns { 0%{transform:scale(1.02) translateY(0)} 50%{transform:scale(1.12) translateY(-2%)} 100%{transform:scale(1.02) translateY(0)} }
-.a-kenburns { animation: kf-kenburns 18s ease-in-out infinite; }
 .spinner { border: 3px solid rgba(255,255,255,.18); border-top-color: var(--p-primary); border-radius: 999px; animation: kf-spin .8s linear infinite; }
 
 /* ——— 进度滑杆 ——— */
@@ -354,9 +295,12 @@ input[type="range"].hg-range::-webkit-slider-thumb { -webkit-appearance: none; w
 .desktop-controls {
   position: absolute; left: 0; right: 0; bottom: 0; z-index: 25;
   padding: 0 22px 10px; color: #bcc3cd;
-  background: linear-gradient(0deg, rgba(6,9,13,.82), rgba(6,9,13,.28) 62%, transparent);
+  background: transparent;
   transition: opacity .25s;
 }
+/* Keep controls legible without laying a dark panel over the video. */
+.desktop-controls, .player-inline-controls { text-shadow: 0 1px 3px rgba(0,0,0,.8); }
+.desktop-control-row svg, .player-inline-controls svg { filter: drop-shadow(0 1px 2px rgba(0,0,0,.75)); }
 .desktop-controls.is-hidden { opacity: 0; pointer-events: none; }
 .playback-unlock { color: rgba(255,255,255,.38); background: rgba(0,0,0,.12); transition: color .2s, background .2s; }
 .playback-unlock:hover, .playback-unlock:focus-visible { color: rgba(255,255,255,.9); background: rgba(0,0,0,.4); }
@@ -531,7 +475,8 @@ input[type="range"].hg-range::-webkit-slider-thumb { -webkit-appearance: none; w
 .article-body ul, .article-body ol { padding-left: 18px; margin: 8px 0; }
 .article-body li { margin: 4px 0; }
 .article-body blockquote { margin: 10px 0; padding: 8px 12px; border-left: 3px solid var(--p-primary); background: rgba(255,255,255,.04); border-radius: 6px; }
-html.theme-light .article-body { color: rgba(20,24,30,.82); }
+html.theme-light .article-body { color: rgba(42, 40, 36, .88); }
+html.theme-light .article-body blockquote { background: rgba(43, 40, 36, .045); }
 
 /* ===================================================================
    视频浮层 / 移动端底栏：固定「亮字压暗底」
@@ -553,12 +498,5 @@ html.theme-light .article-body { color: rgba(20,24,30,.82); }
 /* 没有压暗层时的文字保读：近处硬阴影 + 远处柔光，亮画面也不糊 */
 .hg-ov-shadow-strong { text-shadow: 0 1px 3px rgba(0, 0, 0, .92), 0 2px 12px rgba(0, 0, 0, .78); }
 
-/* 安卓 WebView 点按会留下系统黄色焦点框，视频/底栏这类沉浸按钮一律去掉 */
-.hg-tabbar button,
-.hg-player-ui button,
-.hg-chip,
-.hg-chip-strong { outline: none; -webkit-tap-highlight-color: transparent; }
-.hg-tabbar button:focus,
-.hg-tabbar button:focus-visible,
-.hg-player-ui button:focus,
-.hg-player-ui button:focus-visible { outline: none; }
+
+}

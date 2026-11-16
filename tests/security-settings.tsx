@@ -16,10 +16,10 @@ function deferred<T>() {
 const checks: string[] = [];
 function assert(ok: unknown, label: string) { if (!ok) throw new Error(label); checks.push(label); }
 const originalBoot = api.boot, originalSave = api.securitySet;
-const previousLocal = localStorage.getItem("hghub_strict_security");
+const previousLocal = localStorage.getItem("hghubx_strict_security");
 const root = createRoot(document.querySelector("#fixture")!);
 try {
-  localStorage.setItem("hghub_strict_security", "0");
+  localStorage.setItem("hghubx_strict_security", "0");
   setStrictSecurity(true);
   const boot = deferred<Awaited<ReturnType<typeof api.boot>>>();
   api.boot = () => boot.promise;
@@ -40,7 +40,7 @@ try {
   let failed = false;
   await act(async () => { try { await store!.setStrictSecurity(false); } catch { failed = true; } });
   assert(failed && store!.strictSecurity && isStrictSecurity() && !store!.securityPending, "failed save keeps backend-confirmed mode and reports failure");
-  assert(localStorage.getItem("hghub_strict_security") === "0", "mode changes do not write a second persisted source");
+  assert(localStorage.getItem("hghubx_strict_security") === "0", "mode changes do not write a second persisted source");
   document.querySelector("#results")!.textContent = JSON.stringify({ passed: checks.length, failed: 0, checks });
 } catch (error) {
   document.querySelector("#results")!.textContent = JSON.stringify({ passed: checks.length, failed: 1, error: String(error), checks });
@@ -48,6 +48,6 @@ try {
   await act(async () => root.unmount());
   api.boot = originalBoot; api.securitySet = originalSave;
   setStrictSecurity(true);
-  if (previousLocal === null) localStorage.removeItem("hghub_strict_security");
-  else localStorage.setItem("hghub_strict_security", previousLocal);
+  if (previousLocal === null) localStorage.removeItem("hghubx_strict_security");
+  else localStorage.setItem("hghubx_strict_security", previousLocal);
 }

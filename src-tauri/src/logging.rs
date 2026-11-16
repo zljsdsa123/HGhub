@@ -49,7 +49,7 @@ mod tests {
     fn test_dir() -> std::path::PathBuf {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "hghub-debug-log-{}-{}",
+            "hghubx-debug-log-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));

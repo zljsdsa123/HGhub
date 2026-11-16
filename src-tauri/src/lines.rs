@@ -1,71 +1,57 @@
-//! 线路（数据源）：固定线路 + 地址发布页上的镜像线路。
-//!
-//! 上游只是域名在变，请求链路与数据模型完全一致，所以「切线路」等价于换 `net::base()`。
-//! 镜像地址来自 <https://huangguoai.pages.dev/>：那个页面本身是空壳，真正的清单在
-//! `publish.js` 里（`var urls` 域名数组 + `var subdomains` 子域数组，页面自己随机拼）。
+//! Upstream lines and mirrors published by the upstream address pages.
+//! Publisher scripts are parsed as data; remote JavaScript is never executed.
 
+use dom_query::Document;
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
-/// 固定线路：写死在客户端里，不依赖任何外部页面。
-pub const FIXED: [(&str, &str); 1] = [
+pub const FIXED: [(&str, &str); 2] = [
     ("固定线路 1", "https://huangguoai.com"),
+    ("固定线路 2", "https://huangguoai.ai"),
 ];
-
-const PUBLISH_PAGE: &str = "https://huangguoai.pages.dev/";
-/// 推荐镜像源：这个页面每次打开都会重挑线路，正好当「推荐镜像组」的来源。
-const RECOMMEND_PAGE: &str = "https://huangguoai.ai/";
-/// 推荐页里会出现、但不是站点本体的域名（地址发布页 / 下载站 / 图床 / 统计 / 跳转）。
-const NOT_SITE: [&str; 11] = [
-    "pages.dev",
-    "huangguoai.ai",
-    "huangguoai.com",
-    "huangguoju.com",
-    "gvsnzgbim.cc",
-    "hgai12.com",
-    "drleao.cn",
-    "googletagmanager.com",
-    "cloudfront.net",
-    "t.me",
-    "x.com",
+const PUBLISH_PAGES: [&str; 2] = [
+    "https://huangguoai.pages.dev/",
+    "https://huang-guo.pages.dev/",
 ];
-/// 镜像列表上限（子域 × 域名是笛卡尔积，界面只展示这么多）
 const MIRROR_MAX: usize = 60;
-/// 单条线路探测超时
-const PROBE_TIMEOUT: Duration = Duration::from_secs(8);
+const PUBLISH_ARRAY_MAX: usize = 256;
+const RECOMMENDED_MAX: usize = 20;
+const PAGE_TIMEOUT: Duration = Duration::from_secs(8);
+const MAX_PUBLISH_BYTES: usize = 512 * 1024;
+const AUTO_PROBE_PATH: &str = "/api/videos?page=1&size=1";
+const AUTO_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const AUTO_MIRROR_MAX: usize = 10;
 
-/// 发布页推荐过的镜像 origin。严格模式下只有这些镜像允许携带凭据。
-///
-/// 国内只能走镜像，而镜像与主站同一后端；不认它们的话，切过去之后
-/// 已登录用户的每个带 token 请求都会被挡成「镜像线路仅供游客浏览」。
-/// 只记录**发布页真的给过的**地址，用户手填的域名不会进这张表。
+/// Only origins actually parsed from a trusted publisher can enter this set.
+/// Loading line.json, displaying the current line and probing a host never add trust.
 static TRUSTED_MIRRORS: RwLock<Vec<String>> = RwLock::new(Vec::new());
-fn remember_origin(origin: String) {
-    let mut list = TRUSTED_MIRRORS.write().unwrap_or_else(|e| e.into_inner());
-    if list.len() < 64 && !list.iter().any(|x| x == &origin) {
-        list.push(origin);
+
+fn remember_published(items: &[Value]) {
+    let mut known = TRUSTED_MIRRORS
+        .write()
+        .unwrap_or_else(|error| error.into_inner());
+    for origin in items
+        .iter()
+        .filter_map(|item| item.get("url").and_then(Value::as_str))
+    {
+        if !known.iter().any(|value| value == origin) {
+            if known.len() >= 256 {
+                known.remove(0);
+            }
+            known.push(origin.to_owned());
+        }
     }
 }
-fn remember_mirror(host: &str) {
-    if let Some(origin) = crate::net::normalize_base(&format!("https://{host}")) {
-        remember_origin(origin);
-    }
-}
-/// 记下「选定的线路」本身。上次选过的线路要落盘、重启后还要能带 token，
-/// 所以这里也信任它一次。
-pub fn remember_line(url: &str) {
-    if let Some(origin) = crate::net::normalize_base(url) {
-        remember_origin(origin);
-    }
-}
-/// 这个 origin 是不是发布页推荐过的镜像。
+
 pub fn is_trusted_mirror(origin: &str) -> bool {
     TRUSTED_MIRRORS
         .read()
-        .map(|l| l.iter().any(|x| x == origin))
+        .map(|known| known.iter().any(|value| value == origin))
         .unwrap_or(false)
 }
+
 pub fn fixed() -> Value {
     json!(FIXED
         .iter()
@@ -73,178 +59,495 @@ pub fn fixed() -> Value {
         .collect::<Vec<_>>())
 }
 
-/// 拉地址发布页 → 解析 publish.js → 拼出镜像地址。只在用户点开「线路」时调用。
+pub fn is_fixed(url: &str) -> bool {
+    FIXED.iter().any(|(_, known)| *known == url)
+}
+
+struct PublishedPage {
+    source: String,
+    script: String,
+    items: Vec<Value>,
+}
+
+/// Independent concurrent deadlines preserve either publisher's successful list.
 pub async fn mirrors() -> Result<Value, String> {
-    let html = get_text_within(PUBLISH_PAGE, PAGE_TIMEOUT).await?;
-    let js_rel = script_src(&html).unwrap_or_else(|| "publish.js".to_string());
-    let js_url = absolute(PUBLISH_PAGE, &js_rel);
-    let js = get_text_within(&js_url, PAGE_TIMEOUT).await?;
-
-    let domains = js_array(&js, "var urls");
-    let subs = js_array(&js, "var subdomains");
-    if domains.is_empty() {
-        return Err("地址发布页格式有变化：没找到镜像域名".to_string());
+    let (first, second) = tokio::join!(
+        mirrors_from_page(PUBLISH_PAGES[0]),
+        mirrors_from_page(PUBLISH_PAGES[1])
+    );
+    let result = merge_publishers([first, second], &crate::net::base())?;
+    if let Some(items) = result.get("items").and_then(Value::as_array) {
+        remember_published(items);
     }
+    Ok(result)
+}
 
-    let mut items: Vec<Value> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    'outer: for domain in domains {
-        let domain = domain.trim_end_matches('/').to_string();
-        if domain.is_empty() {
-            continue;
+fn merge_publishers(
+    results: [Result<PublishedPage, String>; 2],
+    current: &str,
+) -> Result<Value, String> {
+    let mut pages = Vec::new();
+    let mut errors = Vec::new();
+    for (index, result) in results.into_iter().enumerate() {
+        match result {
+            Ok(page) => pages.push(page),
+            Err(error) => errors.push(format!("{}: {error}", PUBLISH_PAGES[index])),
         }
-        let hosts: Vec<String> = if subs.is_empty() {
-            vec![domain.clone()]
-        } else {
-            subs.iter().map(|s| format!("{s}.{domain}")).collect()
-        };
-        for host in hosts {
-            if !seen.insert(host.clone()) {
-                continue;
-            }
-            items.push(json!({ "url": format!("https://{host}"), "host": host }));
-            remember_mirror(&host);
-            if items.len() >= MIRROR_MAX {
-                break 'outer;
+    }
+    let mut items = Vec::new();
+    let mut seen = HashSet::new();
+    // Interleave lists so a full first page cannot hide the second publisher.
+    for index in 0..MIRROR_MAX {
+        for page in &pages {
+            if let Some(item) = page.items.get(index) {
+                if let Some(origin) = item.get("url").and_then(Value::as_str) {
+                    if items.len() < MIRROR_MAX && seen.insert(origin.to_owned()) {
+                        items.push(item.clone());
+                    }
+                }
             }
         }
     }
     if items.is_empty() {
-        return Err("地址发布页里没有可用的镜像地址".to_string());
+        return Err(if errors.is_empty() {
+            "地址发布页里没有可用的镜像地址".into()
+        } else {
+            errors.join("；")
+        });
     }
-
-    let mut recommended = match tokio::time::timeout(RECOMMEND_TIMEOUT, recommend()).await {
-        Ok(list) => list,
-        Err(_) => Vec::new(),
-    };
-    // 发布页每次给的子域都不一样（服务端随机拼），自动选线选中的那条
-    // 往往不在这一批里。把当前线路补到最前面，用户一眼能看到「我正走这条」。
-    let current = crate::net::base();
-    if let Some(host) = url::Url::parse(&current)
-        .ok()
-        .and_then(|u| u.host_str().map(str::to_owned))
-    {
-        if !recommended
-            .iter()
-            .any(|v| v.get("url").and_then(Value::as_str) == Some(current.as_str()))
+    let mut recommended = Vec::new();
+    let mut recommended_seen = HashSet::new();
+    // The restored/rotated current line is display-only unless actually published.
+    if let Some(origin) = crate::net::normalize_base(current) {
+        if let Some(host) = url::Url::parse(&origin)
+            .ok()
+            .and_then(|value| value.host_str().map(str::to_owned))
         {
-            recommended.insert(0, json!({ "url": current, "host": host }));
+            recommended_seen.insert(origin.clone());
+            recommended.push(json!({ "url": origin, "host": host }));
         }
     }
-    Ok(json!({
-        "source": PUBLISH_PAGE,
-        "script": js_url,
-        "items": items,
-        "recommended_source": RECOMMEND_PAGE,
-        "recommended": recommended,
-    }))
-}
-
-/// 推荐镜像组：抓推荐源页面，取页面上挂出的站点域名。
-/// 只由 `mirrors()` 调用；条目结构与 `items` 完全一致，顺序保持页面自己的排列。
-async fn recommend() -> Vec<Value> {
-    let Ok(html) = get_text(RECOMMEND_PAGE).await else {
-        return Vec::new();
-    };
-
-    let mut items: Vec<Value> = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for host in href_hosts(&html) {
-        if NOT_SITE.iter().any(|bad| host.ends_with(*bad)) {
-            continue;
-        }
-        if !seen.insert(host.clone()) {
-            continue;
-        }
-        items.push(json!({ "url": format!("https://{host}"), "host": host }));
-        remember_mirror(&host);
-        if items.len() >= MIRROR_MAX {
+    for item in &items {
+        if recommended.len() >= RECOMMENDED_MAX {
             break;
         }
-    }
-    items
-}
-
-/// 从 HTML 里取出 `href="https://<host>/…"` 的 host（去重交给调用方）。
-fn href_hosts(html: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut rest = html;
-    while let Some(i) = rest.find("href=\"https://") {
-        let after = &rest[i + 14..];
-        let end = after.find('"').unwrap_or(after.len());
-        let host = after[..end]
-            .split('/')
-            .next()
-            .unwrap_or_default()
-            .split('?')
-            .next()
-            .unwrap_or_default();
-        if !host.is_empty() {
-            out.push(host.to_string());
-        }
-        rest = &after[end..];
-    }
-    out
-}
-
-/// 可达性探测（并发 6 条一组）。只报结果，不做自动切换。
-pub async fn probe(urls: Vec<String>) -> Value {
-    let mut out: Vec<Value> = Vec::new();
-    for chunk in urls.chunks(6) {
-        let mut handles = Vec::new();
-        for u in chunk {
-            let u = u.clone();
-            handles.push(tokio::spawn(async move { probe_one(u).await }));
-        }
-        for h in handles {
-            if let Ok(v) = h.await {
-                out.push(v);
+        if let Some(origin) = item.get("url").and_then(Value::as_str) {
+            if recommended_seen.insert(origin.to_owned()) {
+                recommended.push(item.clone());
             }
         }
     }
-    json!(out)
+    let sources: Vec<_> = pages.iter().map(|page| page.source.as_str()).collect();
+    let scripts: Vec<_> = pages.iter().map(|page| page.script.as_str()).collect();
+    Ok(
+        json!({ "source": sources.join(", "), "script": scripts.join(", "), "items": items, "recommended_source": sources.join(", "), "recommended": recommended, "errors": errors }),
+    )
 }
 
-async fn probe_one(url: String) -> Value {
-    let target = format!("{}/", url.trim_end_matches('/'));
-    let started = Instant::now();
-    let res = crate::net::get(
-        &target,
-        PROBE_TIMEOUT,
-        Some("text/html,application/xhtml+xml"),
-        None,
-    )
-    .await;
-    let ms = started.elapsed().as_millis() as u64;
-    match res {
-        Ok(r) => {
-            let status = r.status().as_u16();
-            json!({ "url": url, "ok": status < 400, "status": status, "ms": ms })
+async fn mirrors_from_page(page: &str) -> Result<PublishedPage, String> {
+    // One deadline includes DNS, redirects, both bodies and parsing.
+    tokio::time::timeout(PAGE_TIMEOUT, async {
+        let html = get_text(page).await?;
+        let script = script_src(page, &html)?;
+        let js = get_text(&script).await?;
+        let items = parse_mirrors(&js)?;
+        Ok(PublishedPage {
+            source: page.to_owned(),
+            script,
+            items,
+        })
+    })
+    .await
+    .map_err(|_| "获取地址发布页超时（8 秒）".to_owned())?
+}
+
+fn parse_mirrors(js: &str) -> Result<Vec<Value>, String> {
+    let domains = js_array(js, "urls")?.unwrap_or_default();
+    let subs = js_array(js, "subdomains")?.unwrap_or_default();
+    if domains.is_empty() {
+        return Err("发布脚本中没有找到镜像域名".into());
+    }
+    let mut items = Vec::new();
+    let mut seen = HashSet::new();
+    'domains: for domain in domains {
+        let domain = domain.trim().trim_end_matches('/').to_ascii_lowercase();
+        if !valid_dns_name(&domain) {
+            continue;
         }
-        Err(e) => json!({ "url": url, "ok": false, "ms": ms, "error": e }),
+        let hosts: Vec<_> = if subs.is_empty() {
+            vec![domain]
+        } else {
+            subs.iter()
+                .filter_map(|sub| {
+                    let sub = sub.trim().to_ascii_lowercase();
+                    valid_dns_label(&sub).then(|| format!("{sub}.{domain}"))
+                })
+                .collect()
+        };
+        for host in hosts {
+            if !valid_dns_name(&host) || !seen.insert(host.clone()) {
+                continue;
+            }
+            let Some(origin) = crate::net::normalize_base(&format!("https://{host}")) else {
+                continue;
+            };
+            items.push(json!({ "url": origin, "host": host }));
+            if items.len() >= MIRROR_MAX {
+                break 'domains;
+            }
+        }
+    }
+    if items.is_empty() {
+        Err("发布脚本中没有合法镜像地址".into())
+    } else {
+        Ok(items)
     }
 }
 
-/* ───────────────────────── 自动选线 ───────────────────────── */
+fn valid_dns_label(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 63
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        && value.as_bytes()[0].is_ascii_alphanumeric()
+        && value.as_bytes()[value.len() - 1].is_ascii_alphanumeric()
+}
 
-/// 自动选线的主站候选。
-///
-/// 国内基本连不上 `.com`，不通时用推荐页上挂的镜像（见 [`auto_pick`]）。
-/// `.ai` 不再是候选：它只是落地页，`/api` 全 404，切过去用户看到的是
-/// 「首页能开、内容全空」，比明确报错更难排查。
-pub const AUTO_LINES: [(&str, &str); 1] = [("main", crate::net::DEFAULT_BASE)];
-/// 判活就打这一个请求，成本等于 ping：能返回 200 就是这条线路能用。
-const AUTO_PROBE_PATH: &str = "/api/videos?page=1&size=1";
-/// 探测超时：只在启动/换网时用，等太久不如直接用另一条。
-const AUTO_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
-/// 抓「推荐页」的上限：连推荐页都打不开时，选线要能快速给结论，不能拖十几秒。
-const RECOMMEND_TIMEOUT: Duration = Duration::from_secs(6);
-/// 抓地址发布页 / publish.js 的上限：用户点开「线路」面板时就在这等。
-const PAGE_TIMEOUT: Duration = Duration::from_secs(8);
-/// 镜像最多探这么多条，够挑出快的了
-const AUTO_MIRROR_MAX: usize = 10;
+fn valid_dns_name(value: &str) -> bool {
+    value.len() <= 253
+        && value.contains('.')
+        && value.split('.').all(valid_dns_label)
+        && !["localhost", "local", "internal", "home.arpa"]
+            .iter()
+            .any(|suffix| value == *suffix || value.ends_with(&format!(".{suffix}")))
+        && url::Url::parse(&format!("https://{value}"))
+            .ok()
+            .is_some_and(|parsed| matches!(parsed.host(), Some(url::Host::Domain(_))))
+}
 
-/// 一条候选线路的探测结果。
+/// Bounded decoded body; the publisher's outer deadline also covers a slow body.
+async fn get_text(raw: &str) -> Result<String, String> {
+    let target = url::Url::parse(raw).map_err(|_| "发布地址无效")?;
+    let mut response = crate::net::get(
+        raw,
+        PAGE_TIMEOUT,
+        Some("text/html,application/javascript"),
+        None,
+    )
+    .await?;
+    // net::get checks DNS and redirects; publisher authority cannot cross origins.
+    let final_url = response.url();
+    if final_url.scheme() != "https"
+        || final_url.origin() != target.origin()
+        || (target.path().ends_with("/publish.js") && final_url.path() != target.path())
+    {
+        return Err("发布页或发布脚本跳转到了非可信地址".into());
+    }
+    if !response.status().is_success() {
+        return Err(format!("HTTP {}", response.status()));
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_PUBLISH_BYTES as u64)
+    {
+        return Err("地址发布页或脚本超过 512 KiB 限制".into());
+    }
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| crate::net::err_text(&error))?
+    {
+        if bytes.len().saturating_add(chunk.len()) > MAX_PUBLISH_BYTES {
+            return Err("地址发布页或脚本超过 512 KiB 限制".into());
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    String::from_utf8(bytes).map_err(|_| "地址发布页或脚本不是有效 UTF-8".into())
+}
+
+fn script_src(page: &str, html: &str) -> Result<String, String> {
+    let document = Document::from(html);
+    for script in document.select("script[src]").iter() {
+        if let Some(src) = script.attr("src") {
+            if let Ok(url) = absolute(page, &src) {
+                return Ok(url);
+            }
+        }
+    }
+    Err("地址发布页没有同源 publish.js 脚本".into())
+}
+
+fn absolute(base: &str, relative: &str) -> Result<String, String> {
+    if relative.chars().any(char::is_control) {
+        return Err("发布脚本地址含控制字符".into());
+    }
+    let base = url::Url::parse(base).map_err(|_| "发布页地址无效")?;
+    let target = base.join(relative.trim()).map_err(|_| "发布脚本地址无效")?;
+    if base.scheme() != "https"
+        || target.scheme() != "https"
+        || target.origin() != base.origin()
+        || !target.username().is_empty()
+        || target.password().is_some()
+        || target.fragment().is_some()
+        || target.path().rsplit('/').next() != Some("publish.js")
+    {
+        return Err("只接受发布页同源的 HTTPS publish.js".into());
+    }
+    Ok(target.to_string())
+}
+
+/// Persisted lines gain credential trust only after a publisher confirms them.
+/// Anonymous probes must not call this function.
+pub async fn verify_published_origin(origin: &str) -> Result<(), String> {
+    let origin = crate::net::normalize_base(origin).ok_or("线路必须是安全 HTTPS origin")?;
+    if is_fixed(&origin) || is_trusted_mirror(&origin) {
+        return Ok(());
+    }
+    // Concurrent startup requests share a refresh and briefly cache misses.
+    type Refresh = Option<(Instant, Result<(), String>)>;
+    static REFRESH: std::sync::OnceLock<tokio::sync::Mutex<Refresh>> = std::sync::OnceLock::new();
+    tokio::time::timeout(PAGE_TIMEOUT + Duration::from_secs(1), async {
+        let mut refresh = REFRESH
+            .get_or_init(|| tokio::sync::Mutex::new(None))
+            .lock()
+            .await;
+        if is_trusted_mirror(&origin) {
+            return Ok(());
+        }
+        if let Some((_, result)) = refresh
+            .as_ref()
+            .filter(|(at, _)| at.elapsed() < Duration::from_secs(30))
+        {
+            result.clone()?;
+        } else {
+            let result = mirrors().await.map(|_| ());
+            *refresh = Some((Instant::now(), result.clone()));
+            result?;
+        }
+        if is_trusted_mirror(&origin) {
+            Ok(())
+        } else {
+            Err("当前镜像未被可信地址发布页收录；请重新选择线路后登录".into())
+        }
+    })
+    .await
+    .map_err(|_| "验证镜像发布来源超时".to_owned())?
+}
+
+#[derive(Debug, PartialEq)]
+enum JsToken<'a> {
+    Ident(&'a str),
+    Quoted(&'a str),
+    Symbol(u8),
+    Other,
+}
+
+/// A conservative lexer: comments, strings, templates and regular expressions
+/// cannot introduce declarations. No remote JavaScript is ever evaluated.
+fn js_tokens(source: &str) -> Result<Vec<JsToken<'_>>, String> {
+    let bytes = source.as_bytes();
+    let mut out = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        let byte = bytes[at];
+        if byte.is_ascii_whitespace() {
+            at += 1;
+            continue;
+        }
+        if bytes[at..].starts_with(b"//") {
+            at += 2;
+            while at < bytes.len() && bytes[at] != 10 {
+                at += 1;
+            }
+            continue;
+        }
+        if bytes[at..].starts_with(b"/*") {
+            at += 2;
+            let Some(end) = source[at..].find("*/") else {
+                return Err("发布脚本注释未闭合".into());
+            };
+            at += end + 2;
+            continue;
+        }
+        if matches!(byte, 39 | 34 | 96) {
+            let start = at;
+            at += 1;
+            while at < bytes.len() && bytes[at] != byte {
+                if bytes[at] == 92 {
+                    at += 1;
+                }
+                at += 1;
+            }
+            if at >= bytes.len() {
+                return Err("发布脚本字符串未闭合".into());
+            }
+            at += 1;
+            out.push(if byte == 96 {
+                JsToken::Other
+            } else {
+                JsToken::Quoted(&source[start..at])
+            });
+            continue;
+        }
+        // Division is deliberately treated as a regex as well. Publisher data
+        // requires no arithmetic; ambiguous input therefore fails closed.
+        if byte == b'/' {
+            at += 1;
+            let mut in_class = false;
+            while at < bytes.len() {
+                match bytes[at] {
+                    92 => {
+                        at += 2;
+                        continue;
+                    }
+                    b'[' => in_class = true,
+                    b']' => in_class = false,
+                    b'/' if !in_class => break,
+                    10 | 13 => return Err("发布脚本包含不支持的表达式".into()),
+                    _ => {}
+                }
+                at += 1;
+            }
+            if at >= bytes.len() {
+                return Err("发布脚本表达式未闭合".into());
+            }
+            at += 1;
+            while at < bytes.len() && bytes[at].is_ascii_alphabetic() {
+                at += 1;
+            }
+            out.push(JsToken::Other);
+            continue;
+        }
+        if byte.is_ascii_alphabetic() || matches!(byte, b'_' | b'$') {
+            let start = at;
+            at += 1;
+            while at < bytes.len()
+                && (bytes[at].is_ascii_alphanumeric() || matches!(bytes[at], b'_' | b'$'))
+            {
+                at += 1;
+            }
+            out.push(JsToken::Ident(&source[start..at]));
+        } else {
+            out.push(JsToken::Symbol(byte));
+            at += 1;
+        }
+    }
+    Ok(out)
+}
+
+fn js_string(raw: &str) -> Result<String, String> {
+    let mut result = String::new();
+    let mut chars = raw[1..raw.len() - 1].chars();
+    while let Some(ch) = chars.next() {
+        if ch != char::from(92) {
+            if ch.is_control() {
+                return Err("镜像字符串含控制字符".into());
+            }
+            result.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some(ch) if matches!(ch as u32, 92 | 39 | 34 | 47) => result.push(ch),
+            Some('x') => {
+                let code: String = chars.by_ref().take(2).collect();
+                let byte = u8::from_str_radix(&code, 16)
+                    .ok()
+                    .filter(|_| code.len() == 2)
+                    .ok_or("镜像字符串转义无效")?;
+                result.push(char::from(byte));
+            }
+            Some('u') => {
+                let code: String = chars.by_ref().take(4).collect();
+                let number = u32::from_str_radix(&code, 16)
+                    .ok()
+                    .filter(|_| code.len() == 4)
+                    .ok_or("镜像字符串转义无效")?;
+                result.push(char::from_u32(number).ok_or("镜像字符串转义无效")?);
+            }
+            _ => return Err("镜像字符串含不支持的转义".into()),
+        }
+    }
+    Ok(result)
+}
+
+/// Only literal top-level var/let/const arrays are accepted. Malformed
+/// subdomains must not fall back to trusting the bare domains.
+fn js_array(source: &str, name: &str) -> Result<Option<Vec<String>>, String> {
+    let tokens = js_tokens(source)?;
+    let mut depth = 0usize;
+    let mut result = None;
+    for (at, token) in tokens.iter().enumerate() {
+        let declaration = matches!(token, JsToken::Ident("var" | "let" | "const"));
+        if depth == 0 && declaration && tokens.get(at + 1) == Some(&JsToken::Ident(name)) {
+            if result.is_some() {
+                return Err(format!("发布脚本重复声明 {name}"));
+            }
+            if tokens.get(at + 2) != Some(&JsToken::Symbol(b'='))
+                || tokens.get(at + 3) != Some(&JsToken::Symbol(b'['))
+            {
+                return Err(format!("发布脚本的 {name} 必须是字符串数组"));
+            }
+            let mut cursor = at + 4;
+            let mut values = Vec::new();
+            while tokens.get(cursor) != Some(&JsToken::Symbol(b']')) {
+                let Some(JsToken::Quoted(raw)) = tokens.get(cursor) else {
+                    return Err(format!("发布脚本的 {name} 含非字符串值"));
+                };
+                if values.len() >= PUBLISH_ARRAY_MAX {
+                    return Err(format!("{name} exceeds the publisher array size limit"));
+                }
+                values.push(js_string(raw)?);
+                cursor += 1;
+                match tokens.get(cursor) {
+                    Some(JsToken::Symbol(b',')) => cursor += 1,
+                    Some(JsToken::Symbol(b']')) => {}
+                    _ => return Err(format!("发布脚本的 {name} 数组格式无效")),
+                }
+            }
+            if !matches!(tokens.get(cursor + 1), None | Some(JsToken::Symbol(b';'))) {
+                return Err(format!("发布脚本的 {name} 不能使用动态表达式"));
+            }
+            result = Some(values);
+        }
+        match token {
+            JsToken::Symbol(b'{' | b'(' | b'[') => depth += 1,
+            JsToken::Symbol(b'}' | b')' | b']') => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    Ok(result)
+}
+
+/// Validate the unwrapped /api/videos data, rather than HTML or status alone.
+pub(crate) fn healthy_video_data(data: &Value) -> bool {
+    let Some(items) = data.get("items").and_then(Value::as_array) else {
+        return false;
+    };
+    let Some(pagination) = data.get("pagination").and_then(Value::as_object) else {
+        return false;
+    };
+    let integer = |key: &str| pagination.get(key).and_then(Value::as_u64);
+    if integer("page").is_none_or(|n| n == 0)
+        || integer("size").is_none_or(|n| n == 0)
+        || integer("pages").is_none()
+        || integer("total").is_none()
+    {
+        return false;
+    }
+    // These two fields are stable feed identity, unlike optional cover/score.
+    items.iter().all(|item| {
+        item.get("id")
+            .and_then(Value::as_u64)
+            .is_some_and(|id| id > 0)
+            && item
+                .get("title")
+                .and_then(Value::as_str)
+                .is_some_and(|title| !title.trim().is_empty())
+    })
+}
+
 #[derive(Clone)]
 pub struct Hit {
     pub tier: &'static str,
@@ -253,332 +556,389 @@ pub struct Hit {
     pub reachable: bool,
     pub ms: u64,
     pub status: Option<u16>,
+    error: Option<String>,
 }
 
 impl Hit {
     fn json(&self) -> Value {
-        json!({
-            "tier": self.tier,
-            "url": self.url,
-            "ok": self.ok,
-            "reachable": self.reachable,
-            "ms": self.ms,
-            "status": self.status,
-        })
+        let mut value = json!({ "tier": self.tier, "url": self.url, "ok": self.ok,
+            "reachable": self.reachable, "ms": self.ms, "status": self.status });
+        if let Some(error) = &self.error {
+            value["error"] = json!(error);
+        }
+        value
     }
 }
 
-async fn probe_hit(tier: &'static str, url: &str) -> Hit {
-    let target = format!("{}{}", url.trim_end_matches('/'), AUTO_PROBE_PATH);
+async fn probe_hit(tier: &'static str, raw: &str) -> Hit {
+    let mut hit = Hit {
+        tier,
+        url: raw.to_owned(),
+        ok: false,
+        reachable: false,
+        ms: 0,
+        status: None,
+        error: None,
+    };
+    let Some(origin) = crate::net::normalize_base(raw) else {
+        hit.error = Some("线路必须是安全 HTTPS origin".into());
+        return hit;
+    };
+    hit.url = origin.clone();
     let started = Instant::now();
-    let res = crate::net::get(&target, AUTO_PROBE_TIMEOUT, Some("application/json"), None).await;
-    let ms = started.elapsed().as_millis() as u64;
-    match res {
-        Ok(r) => {
-            let status = r.status().as_u16();
-            Hit {
-                tier,
-                url: url.to_string(),
-                // 只看接口：首页 200 不代表能用（.ai 就是 200 + /api 全 404）
-                ok: status == 200,
-                reachable: status < 500,
-                ms,
-                status: Some(status),
+    // edge sends the upstream's real envelope. None explicitly omits credentials.
+    // This total deadline also covers edge retries and the response body.
+    match tokio::time::timeout(
+        AUTO_PROBE_TIMEOUT,
+        crate::net::edge(&origin, "GET", AUTO_PROBE_PATH, None, None),
+    )
+    .await
+    {
+        Ok(Ok(data)) => {
+            hit.reachable = true;
+            hit.status = Some(200);
+            hit.ok = healthy_video_data(&data);
+            if !hit.ok {
+                hit.error = Some("接口未返回有效视频列表数据".into());
             }
         }
-        Err(_) => Hit {
-            tier,
-            url: url.to_string(),
-            ok: false,
-            reachable: false,
-            ms,
-            status: None,
-        },
+        Ok(Err(error)) => {
+            hit.error = Some(error);
+        }
+        Err(_) => {
+            hit.error = Some("视频接口探测超时（5 秒）".into());
+        }
     }
+    hit.ms = started.elapsed().as_millis() as u64;
+    hit
 }
 
-/// 自动选线：ping 一次主站，不通就用推荐页上挂的镜像。
-///
-/// ping = 一次 `GET /api/videos?page=1&size=1`，成本跟 ICMP 差不多。
-/// 只看首页不够：`.ai` 首页 200，但它只是落地页，`/api` 全 404。
-///
-/// 主站和镜像全都不通时返回 `reason = "all-down"` 且 `base` 为空 —— **不切线路**。
-/// 以前这里会盲切到 `.ai`（`ms = 0`），用户看到的是「首页能开、内容全空」，
-/// 比直接提示「线路全部不可用」更难排查。
-pub async fn auto_pick() -> Value {
-    let (main_tier, main_url) = AUTO_LINES[0];
-
-    let main_hit = probe_hit(main_tier, main_url).await;
-    if main_hit.ok {
-        return json!({
-            "base": main_url,
-            "tier": main_tier,
-            "ms": main_hit.ms,
-            "reason": "main-ok",
-            "candidates": [main_hit.json()],
-        });
+/// Manual checks retain their JSON API and never change trust or active line.
+pub async fn probe(urls: Vec<String>) -> Value {
+    let mut out = Vec::new();
+    for chunk in urls[..urls.len().min(MIRROR_MAX)].chunks(6) {
+        let mut handles = Vec::new();
+        for origin in chunk {
+            let origin = origin.clone();
+            handles.push(tokio::spawn(
+                async move { probe_hit("mirror", &origin).await },
+            ));
+        }
+        for handle in handles {
+            if let Ok(hit) = handle.await {
+                out.push(hit.json());
+            }
+        }
     }
+    json!(out)
+}
 
-    // 主站不通（国内）：用它推荐页上挂的镜像。推荐页自己也可能是超时的，
-    // 给个上限，别让一次选线拖十几秒还没结论。
-    let mirrors = match tokio::time::timeout(RECOMMEND_TIMEOUT, recommend()).await {
-        Ok(list) => list,
-        Err(_) => Vec::new(),
-    };
-    let mut urls: Vec<String> = mirrors
+/// A display recommendation is not proof of publication. Candidates are built
+/// exclusively from the published items; the .ai landing page is never automatic.
+fn auto_candidates(items: &[Value], current: &str, trusted: impl Fn(&str) -> bool) -> Vec<String> {
+    let mut candidates = Vec::new();
+    let mut seen = HashSet::new();
+    let current = crate::net::normalize_base(current);
+    let published: Vec<_> = items
         .iter()
-        .filter_map(|v| v.get("url").and_then(Value::as_str).map(str::to_string))
-        .take(AUTO_MIRROR_MAX)
+        .filter_map(|item| item.get("url").and_then(Value::as_str))
+        .filter_map(crate::net::normalize_base)
+        .filter(|origin| !is_fixed(origin) && trusted(origin))
         .collect();
-    urls.dedup();
-    let mut handles = Vec::new();
-    for u in urls {
-        handles.push(tokio::spawn(async move { probe_hit("mirror", &u).await }));
+    // Preserve an actually published current line as a candidate, even with a
+    // large published list. A line restored only from disk never qualifies.
+    if let Some(origin) = current.filter(|origin| published.contains(origin)) {
+        seen.insert(origin.clone());
+        candidates.push(origin);
     }
-    let mut hits = vec![main_hit.clone()];
-    for h in handles {
-        if let Ok(hit) = h.await {
-            hits.push(hit);
+    for origin in published {
+        if candidates.len() >= AUTO_MIRROR_MAX {
+            break;
+        }
+        if seen.insert(origin.clone()) {
+            candidates.push(origin);
         }
     }
-    hits.sort_by_key(|h| (!h.ok, h.ms));
-    let candidates: Vec<Value> = hits.iter().map(Hit::json).collect();
-    if let Some(h) = hits.first().filter(|h| h.ok) {
-        return json!({
-            "base": h.url,
-            "tier": h.tier,
-            "ms": h.ms,
-            "reason": "mirror-fallback",
-            "candidates": candidates,
-        });
-    }
-    // 全都不通：保持当前线路不动，把「全都不可用」这个结论交给前端提示。
-    json!({
-        "base": "",
-        "tier": "",
-        "ms": 0,
-        "reason": "all-down",
-        "candidates": candidates,
-    })
+    candidates
 }
-/// 只在「当前走的不是主站」时用：探一次主站，通了就切回，不通保持原状。
-///
-/// 比 [`auto_pick`] 便宜得多——不抓发布页、不并发探镜像，就一个请求。
-/// 解决的是「挂着代理却一直待在镜像上」：镜像自己也是通的，体检看不出任何问题，
-/// 只有主动敲一下主站，才知道现在能不能回去。
+
+fn pick_from_hits(hits: &[Hit]) -> Value {
+    let winner = hits.iter().filter(|hit| hit.ok).min_by_key(|hit| hit.ms);
+    let candidates: Vec<_> = hits.iter().map(Hit::json).collect();
+    match winner {
+        Some(hit) => json!({ "base": hit.url, "tier": hit.tier, "ms": hit.ms,
+            "reason": if hit.tier == "main" { "main-ok" } else { "mirror-ok" }, "candidates": candidates }),
+        None => {
+            json!({ "base": "", "tier": "none", "ms": 0, "reason": "all-down", "candidates": candidates })
+        }
+    }
+}
+
+/// Prefer the real main API; otherwise probe trusted published mirrors in
+/// parallel. Publisher errors never discard another publisher's valid result.
+pub async fn auto_pick() -> Value {
+    let mut hits = vec![probe_hit("main", FIXED[0].1).await];
+    if hits[0].ok {
+        return pick_from_hits(&hits);
+    }
+    let listing = mirrors().await;
+    if let Ok(listing) = &listing {
+        let items = listing
+            .get("items")
+            .and_then(Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let mut handles = Vec::new();
+        for origin in auto_candidates(items, &crate::net::base(), is_trusted_mirror) {
+            handles.push(tokio::spawn(
+                async move { probe_hit("mirror", &origin).await },
+            ));
+        }
+        for handle in handles {
+            if let Ok(hit) = handle.await {
+                hits.push(hit);
+            }
+        }
+    }
+    let mut result = pick_from_hits(&hits);
+    if let Err(error) = listing {
+        result["mirror_error"] = json!(error);
+    }
+    result
+}
+
 pub async fn try_main() -> Value {
-    let (tier, url) = AUTO_LINES[0];
-    let hit = probe_hit(tier, url).await;
-    json!({
-        "ok": hit.ok,
-        "base": hit.url,
-        "tier": tier,
-        "ms": hit.ms,
-        "status": hit.status,
-    })
+    let hit = probe_hit("main", FIXED[0].1).await;
+    let mut result = hit.json();
+    result["base"] = json!(hit.url);
+    result
 }
-/// 判活「当前线路」：和 [`auto_pick`] 用同一个请求（`/api/videos?page=1&size=1`）。
-///
-/// 只看首页不行——`.ai` 首页 200、`/api` 全 404，首页判活会把体检结论骗成「通」，
-/// 于是坏线路一直不被换掉。这里探的是真接口，通就是真能出内容。
+
 pub async fn health() -> Value {
-    let current = crate::net::base();
-    let hit = probe_hit("current", &current).await;
-    json!({
-        "base": current,
-        "ok": hit.ok,
-        "ms": hit.ms,
-        "status": hit.status,
-    })
-}
-async fn get_text(url: &str) -> Result<String, String> {
-    let resp = crate::net::get(url, Duration::from_secs(12), None, None).await?;
-    if !resp.status().is_success() {
-        return Err(format!("HTTP {}", resp.status()));
-    }
-    resp.text().await.map_err(|e| crate::net::err_text(&e))
-}
-
-/// 带超时的 [`get_text`]：12 秒对外面页面太宽容了——用户点开「线路」面板时
-/// 就在这一步等着，页面挂掉会让人以为整个应用卡死。
-async fn get_text_within(url: &str, limit: Duration) -> Result<String, String> {
-    match tokio::time::timeout(limit, get_text(url)).await {
-        Ok(r) => r,
-        Err(_) => Err("请求超时".to_string()),
-    }
-}
-
-/// 从 HTML 里挑出脚本地址（发布页只有一个 `publish.js?<版本>`）。
-fn script_src(html: &str) -> Option<String> {
-    let mut rest = html;
-    while let Some(i) = rest.find("src=\"") {
-        let after = &rest[i + 5..];
-        let end = after.find('"')?;
-        let candidate = &after[..end];
-        if candidate.contains(".js") {
-            return Some(candidate.to_string());
-        }
-        rest = &after[end..];
-    }
-    None
-}
-
-fn absolute(base: &str, rel: &str) -> String {
-    if rel.starts_with("http://") || rel.starts_with("https://") {
-        return rel.to_string();
-    }
-    let origin = url::Url::parse(base)
-        .ok()
-        .map(|u| format!("{}://{}", u.scheme(), u.host_str().unwrap_or_default()));
-    match origin {
-        Some(o) if rel.starts_with('/') => format!("{o}{rel}"),
-        Some(o) => format!("{o}/{rel}"),
-        None => rel.to_string(),
-    }
-}
-
-/// 取 JS 里 `var <name> = [ ... ]` 的字符串数组（去掉行尾 `//` 注释，但保留字符串里的 `//`）。
-fn js_array(src: &str, decl: &str) -> Vec<String> {
-    let Some(at) = src.find(decl) else {
-        return Vec::new();
-    };
-    let rest = &src[at..];
-    let Some(open) = rest.find('[') else {
-        return Vec::new();
-    };
-    let Some(close) = rest[open..].find(']') else {
-        return Vec::new();
-    };
-    strip_line_comments(&rest[open + 1..open + close])
-        .split(',')
-        .map(|raw| {
-            raw.trim()
-                .trim_matches(|c: char| c == '\'' || c == '"')
-                .trim()
-                .to_string()
-        })
-        .filter(|s| !s.is_empty())
-        .collect()
-}
-
-/// 去掉 `//` 行尾注释（引号内的 `//` 是 URL，不能动）。
-fn strip_line_comments(body: &str) -> String {
-    let mut out = String::with_capacity(body.len());
-    let mut quote: Option<char> = None;
-    let mut chars = body.chars().peekable();
-    while let Some(c) = chars.next() {
-        match quote {
-            Some(q) => {
-                out.push(c);
-                if c == q {
-                    quote = None;
-                }
-            }
-            None => {
-                if c == '\'' || c == '"' {
-                    quote = Some(c);
-                    out.push(c);
-                } else if c == '/' && chars.peek() == Some(&'/') {
-                    for n in chars.by_ref() {
-                        if n == '\n' {
-                            out.push('\n');
-                            break;
-                        }
-                    }
-                } else {
-                    out.push(c);
-                }
-            }
-        }
-    }
-    out
+    let hit = probe_hit("current", &crate::net::base()).await;
+    let mut result = hit.json();
+    result["base"] = json!(hit.url);
+    result
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const SAMPLE: &str = r#"
-var subdomains = [
-    'thu',  // 清华
-    'pku',  // 北大
-];
-var urls=[
-	'xxbgwypx.cc/',
-];
-var otherUrls = [
-	'https://huangguoai.pages.dev',
-];
-var foreverUrls = [
-	  'https://huangguoai.com',
-	JumpPage,
-	'https://huangguoai.ai',
-];
-"#;
+    fn origins(items: &[Value]) -> Vec<&str> {
+        items
+            .iter()
+            .filter_map(|item| item["url"].as_str())
+            .collect()
+    }
 
     #[test]
-    fn parses_publish_js_arrays() {
-        assert_eq!(js_array(SAMPLE, "var urls"), vec!["xxbgwypx.cc/"]);
-        assert_eq!(js_array(SAMPLE, "var subdomains"), vec!["thu", "pku"]);
+    fn literal_arrays_support_comments_quotes_and_trailing_commas() {
+        let js = r#"/* before */ var urls = ['EXAMPLE.COM/', "two.example",];
+          const subdomains = [ 'one', // line comment
+          'two', ]; var untouched = 'https://example.com/';"#;
+        let items = parse_mirrors(js).unwrap();
         assert_eq!(
-            js_array(SAMPLE, "var foreverUrls"),
-            vec![
-                "https://huangguoai.com",
-                "JumpPage",
-                "https://huangguoai.ai"
+            origins(&items),
+            [
+                "https://one.example.com",
+                "https://two.example.com",
+                "https://one.two.example",
+                "https://two.two.example"
             ]
         );
-    }
-
-    #[test]
-    fn resolves_relative_script() {
         assert_eq!(
-            absolute("https://huangguoai.pages.dev/", "publish.js?20261103-2"),
-            "https://huangguoai.pages.dev/publish.js?20261103-2"
-        );
-        assert_eq!(
-            absolute("https://huangguoai.pages.dev/", "/a/b.js"),
-            "https://huangguoai.pages.dev/a/b.js"
+            js_array("let urls = ['https://host/'];", "urls")
+                .unwrap()
+                .unwrap(),
+            ["https://host/"]
         );
     }
 
     #[test]
-    fn picks_script_src() {
-        let html = r#"<link rel="stylesheet" href="publish.css?1" /><script type="text/javascript" src="publish.js?20261103-2"></script>"#;
-        assert_eq!(script_src(html).as_deref(), Some("publish.js?20261103-2"));
-    }
-
-    #[test]
-    fn extracts_href_hosts() {
-        let html = r#"<a href="https://gnpra.adihsppe.cc/ai-huanlian/">a</a><a href="https://huangguoai.com/terms/?x=1">b</a><a href="https://t.me/huangguofans">c</a>"#;
-        assert_eq!(
-            href_hosts(html),
-            vec!["gnpra.adihsppe.cc", "huangguoai.com", "t.me"]
-        );
-    }
-
-    /// 手动跑：`cargo test --lib -- --ignored lines::tests::mirrors_live -- --nocapture`
-    #[tokio::test]
-    #[ignore = "联网测试：请求上游镜像列表，手动用 --ignored 运行"]
-    async fn mirrors_live() {
-        match mirrors().await {
-            Ok(v) => println!("{}", serde_json::to_string_pretty(&v).expect("json")),
-            Err(e) => panic!("mirrors failed: {e}"),
+    fn fake_declarations_in_comments_strings_templates_and_regex_are_ignored() {
+        for js in [
+            r#"// var urls=['bad.example'];"#,
+            r#"/* var urls=['bad.example']; */"#,
+            r#"const text = "var urls=['bad.example'];";"#,
+            r#"const text = `var urls=['bad.example'];`;"#,
+            r#"const regex = /var urls=['bad.example'];/;"#,
+            r#"var urlsExtra=['bad.example'];"#,
+            r#"function notRun() { var urls=['bad.example']; }"#,
+        ] {
+            assert!(parse_mirrors(js).is_err(), "{js}");
         }
     }
 
-    /// 手动跑：`cargo test --lib -- --ignored lines::tests::probe_live -- --nocapture`
-    #[tokio::test]
-    #[ignore = "联网测试：探测上游线路连通性，手动用 --ignored 运行"]
-    async fn probe_live() {
-        let urls = vec![
-            "https://huangguoai.com".to_string(),
-            "https://huangguoai.ai".to_string(),
-            "https://thu.xxbgwypx.cc".to_string(),
-        ];
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&probe(urls).await).expect("json")
+    #[test]
+    fn dynamic_or_malformed_arrays_fail_closed_including_subdomains() {
+        for js in [
+            r#"var urls=['one.example', getHost()];"#,
+            r#"var urls=['one.example' + '.evil'];"#,
+            r#"var urls=['one.example'].concat(other);"#,
+            r#"var urls=['one.example']; var urls=['two.example'];"#,
+            r#"var urls=['one.example']; var subdomains=getSubs();"#,
+            r#"var urls=['one.example']; var subdomains=['one', 2];"#,
+            r#"var urls=['one.example']; /* unfinished"#,
+        ] {
+            assert!(parse_mirrors(js).is_err(), "{js}");
+        }
+    }
+
+    #[test]
+    fn hostnames_are_canonical_bounded_and_not_paths_or_literal_ips() {
+        let items = parse_mirrors(r#"var urls=['Example.COM', 'example.com/', '127.0.0.1', 'localhost', 'x.local', 'x.internal', 'x.home.arpa', 'https://evil.example', 'evil.example/path', 'a.example:443', '-a.example', 'valid.example'];"#).unwrap();
+        assert_eq!(
+            origins(&items),
+            ["https://example.com", "https://valid.example"]
         );
+        let js = format!(
+            "var urls=[{}];",
+            (0..100)
+                .map(|n| format!("'host{n}.example'"))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        assert_eq!(parse_mirrors(&js).unwrap().len(), MIRROR_MAX);
+    }
+
+    #[test]
+    fn publish_script_is_same_origin_and_exact_filename() {
+        let page = PUBLISH_PAGES[0];
+        for html in [
+            "<script src='publish.js?v=2'></script>",
+            "<script src=publish.js></script>",
+            r#"<script src='/analytics.js'></script><script src="/publish.js"></script>"#,
+        ] {
+            let script = script_src(page, html).unwrap();
+            assert!(script.starts_with("https://huangguoai.pages.dev/publish.js"));
+        }
+        for target in [
+            "http://huangguoai.pages.dev/publish.js",
+            "https://other.example/publish.js",
+            "//other.example/publish.js",
+            "javascript:publish.js",
+            "https://user@huangguoai.pages.dev/publish.js",
+            "/publish.js#fragment",
+            "/publish.js/extra",
+            "/publish.js.evil",
+        ] {
+            assert!(absolute(page, target).is_err(), "{target}");
+        }
+        assert!(script_src(page, "<script src='analytics.js'></script>").is_err());
+    }
+
+    fn page(source: &str, hosts: &[&str]) -> Result<PublishedPage, String> {
+        Ok(PublishedPage {
+            source: source.into(),
+            script: format!("{source}publish.js"),
+            items: hosts
+                .iter()
+                .map(|host| json!({"host": host, "url": format!("https://{host}")}))
+                .collect(),
+        })
+    }
+
+    #[test]
+    fn publisher_failure_retains_other_success_and_current_is_display_only() {
+        let value = merge_publishers(
+            [
+                Err("timeout".into()),
+                page(PUBLISH_PAGES[1], &["a.example"]),
+            ],
+            "https://restored.example",
+        )
+        .unwrap();
+        assert_eq!(
+            origins(value["items"].as_array().unwrap()),
+            ["https://a.example"]
+        );
+        assert_eq!(value["recommended"][0]["url"], "https://restored.example");
+        assert_eq!(value["errors"].as_array().unwrap().len(), 1);
+        assert!(merge_publishers([Err("first".into()), Err("second".into())], FIXED[0].1).is_err());
+    }
+
+    #[test]
+    fn publisher_lists_interleave_and_deduplicate() {
+        let value = merge_publishers(
+            [
+                page(PUBLISH_PAGES[0], &["a.example", "c.example"]),
+                page(PUBLISH_PAGES[1], &["b.example", "a.example"]),
+            ],
+            "https://a.example",
+        )
+        .unwrap();
+        assert_eq!(
+            origins(value["items"].as_array().unwrap()),
+            [
+                "https://a.example",
+                "https://b.example",
+                "https://c.example"
+            ]
+        );
+        assert_eq!(value["recommended"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn health_requires_real_unwrapped_feed_data() {
+        let valid = json!({"items": [{"id": 12, "title": "video"}], "pagination": {"page": 1, "pages": 2, "size": 1, "total": 2}});
+        assert!(healthy_video_data(&valid));
+        assert!(healthy_video_data(
+            &json!({"items": [], "pagination": {"page": 1, "pages": 0, "size": 1, "total": 0}})
+        ));
+        for invalid in [
+            Value::Null,
+            json!("<html>200 OK</html>"),
+            json!({}),
+            json!({"status": 0, "msg": "denied"}),
+            json!({"status": 1, "data": valid}),
+            json!({"items": []}),
+            json!({"items": [{}], "pagination": {"page": 1, "pages": 1, "size": 1, "total": 1}}),
+        ] {
+            assert!(!healthy_video_data(&invalid), "{invalid}");
+        }
+    }
+
+    fn hit(url: &str, ok: bool, ms: u64) -> Hit {
+        Hit {
+            tier: "mirror",
+            url: url.into(),
+            ok,
+            reachable: true,
+            ms,
+            status: Some(200),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn all_down_never_returns_a_line_to_switch_to() {
+        for hits in [vec![], vec![hit("https://bad.example", false, 1)]] {
+            let selected = pick_from_hits(&hits);
+            assert_eq!(selected["reason"], "all-down");
+            assert_eq!(selected["base"], "");
+            assert_eq!(selected["tier"], "none");
+        }
+        let selected = pick_from_hits(&[
+            hit("https://html.example", false, 1),
+            hit("https://slow.example", true, 20),
+            hit("https://fast.example", true, 8),
+        ]);
+        assert_eq!(selected["base"], "https://fast.example");
+    }
+
+    #[test]
+    fn auto_candidates_require_publication_and_exclude_ai_landing_page() {
+        let items = [
+            json!({"url": FIXED[1].1}),
+            json!({"url": "https://published.example"}),
+            json!({"url": "https://untrusted.example"}),
+            json!({"url": "https://published.example"}),
+        ];
+        let candidates = auto_candidates(&items, "https://restored.example", |origin| {
+            origin == "https://published.example"
+        });
+        assert_eq!(candidates, ["https://published.example"]);
+        assert!(auto_candidates(&[], "https://restored.example", |_| true).is_empty());
     }
 }

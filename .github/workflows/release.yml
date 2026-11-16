@@ -86,13 +86,13 @@ jobs:
           $v = "${{ steps.ver.outputs.version }}"
           New-Item -ItemType Directory -Force artifacts | Out-Null
           Copy-Item "src-tauri/target/release/bundle/nsis/*.exe" artifacts/
-          $bin = "src-tauri/target/release/huangguo-client.exe"
+          $bin = "src-tauri/target/release/hghubx.exe"
           if (-not (Test-Path $bin)) {
             $bin = (Get-ChildItem "src-tauri/target/release" -Filter *.exe | Select-Object -First 1).FullName
           }
-          Copy-Item $bin "artifacts/HGhub.exe"
-          Compress-Archive -Path "artifacts/HGhub.exe" -DestinationPath "artifacts/HGhub_${v}_x64_portable.zip" -Force
-          Remove-Item "artifacts/HGhub.exe"
+          Copy-Item $bin "artifacts/HGhubX.exe"
+          Compress-Archive -Path "artifacts/HGhubX.exe" -DestinationPath "artifacts/HGhubX_${v}_x64_portable.zip" -Force
+          Remove-Item "artifacts/HGhubX.exe"
           Get-ChildItem artifacts | Select-Object Name, Length
 
       - uses: actions/upload-artifact@v7
@@ -203,7 +203,7 @@ jobs:
           found=0
           for f in $(find src-tauri/gen/android/app/build/outputs/apk -name '*-release*.apk'); do
             abi="$(basename "$(dirname "$(dirname "$f")")")"
-            out="artifacts/HGhub_${VERSION}_${abi}.apk"
+            out="artifacts/HGhubX_${VERSION}_${abi}.apk"
             "$APKSIGNER" sign \
               --ks "$KS" --ks-key-alias "$KEY_ALIAS" \
               --ks-pass "pass:$STORE_PASSWORD" --key-pass "pass:$KEY_PASSWORD" \
@@ -294,7 +294,7 @@ jobs:
           SUFFIX=universal
           if [ "${{ inputs.quick }}" = "true" ]; then DIR=aarch64-apple-darwin; SUFFIX=arm64; fi
           cp "src-tauri/target/$DIR/release/bundle/dmg/"*.dmg \
-             "artifacts/HGhub_${{ steps.ver.outputs.version }}_${SUFFIX}.dmg"
+             "artifacts/HGhubX_${{ steps.ver.outputs.version }}_${SUFFIX}.dmg"
           ls -lh artifacts
 
       - uses: actions/upload-artifact@v7
@@ -443,7 +443,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p artifacts
-          cp src-tauri/target/release/bundle/deb/*.deb "artifacts/HGhub_${{ steps.ver.outputs.version }}_amd64.deb"
+          cp src-tauri/target/release/bundle/deb/*.deb "artifacts/HGhubX_${{ steps.ver.outputs.version }}_amd64.deb"
           ls -lh artifacts
 
       - uses: actions/upload-artifact@v7

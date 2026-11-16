@@ -347,7 +347,7 @@ mod tests {
     #[test]
     fn commands_stop_writes_when_disabled_and_read_retained_logs() {
         let dir = std::env::temp_dir().join(format!(
-            "hghub-playback-commands-{}-{}",
+            "hghubx-playback-commands-{}-{}",
             std::process::id(),
             SEQ.fetch_add(1, Ordering::Relaxed)
         ));
@@ -398,7 +398,7 @@ mod tests {
     #[test]
     fn logging_rotates_and_persists_without_changing_mode_on_save_failure() {
         let dir = std::env::temp_dir().join(format!(
-            "hghub-playback-log-{}",
+            "hghubx-playback-log-{}",
             SEQ.fetch_add(1, Ordering::Relaxed)
         ));
         fs::create_dir_all(&dir).unwrap();

@@ -1,0 +1,31 @@
+.post-player-slot { position:relative; min-width:0; }
+.post-player { width:100%; height:100%; isolation:isolate; color:#fff; }
+.post-player:fullscreen { width:100vw; height:100vh; height:100dvh; }
+.post-player .player-inline-controls {
+  position:absolute; z-index:2; inset-inline:0; bottom:0;
+  padding:4px 12px 8px; opacity:1; transition:opacity .18s ease;
+  color:#fff; text-shadow:0 1px 3px rgb(0 0 0 / .8);
+}
+.post-player[data-fullscreen=true] .player-inline-controls {
+  padding-left:max(12px,env(safe-area-inset-left,0px));
+  padding-right:max(12px,env(safe-area-inset-right,0px));
+  padding-bottom:max(8px,env(safe-area-inset-bottom,0px));
+}
+.post-player-seek-row { display:flex; align-items:center; gap:10px; min-width:0; }
+.post-player-seek-row .hg-range { width:0; min-width:0; flex:1; min-height:28px; }
+.post-player-time { flex:none; white-space:nowrap; font-size:11px; font-variant-numeric:tabular-nums; }
+.post-player-actions { display:flex; align-items:center; justify-content:space-between; gap:8px; }
+.post-player-actions>.ios-button {
+  display:flex; align-items:center; justify-content:center; flex:none;
+  width:44px; height:44px; min-width:44px; min-height:44px;
+  padding:0; border-radius:999px; color:#fff;
+}
+.post-player-actions svg { filter:drop-shadow(0 1px 2px rgb(0 0 0 / .75)); }
+.post-player-actions>.ios-button:focus-visible { outline:2px solid #fff; outline-offset:-2px; }
+/* Touch devices have no hover; only fine-pointer desktops fade the controls. */
+@media (hover:hover) and (pointer:fine) {
+  .post-player[data-playing=true]:not(:hover):not(:focus-within) .player-inline-controls { opacity:0; pointer-events:none; }
+}
+@media (prefers-reduced-motion:reduce) {
+  .post-player .player-inline-controls { transition:none; }
+}

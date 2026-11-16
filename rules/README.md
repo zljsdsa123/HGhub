@@ -1,4 +1,4 @@
-# HGhub 分流规则
+# HGhubX 分流规则
 
 统计日期：2026-11-07。包含 5 条域名后缀规则和 3 条精确域名规则；没有已确认的固定服务端 IP/CIDR。规则只决定流量如何分流，不改变应用的账号信任或正文清洗策略。
 
@@ -21,25 +21,25 @@ GitHub 是共享基础设施，这两条精确规则也会匹配其他程序对�
 
 ## Mihomo
 
-使用 [hghub.list](hghub.list)，这是 `classical` 行为、`text` 格式的规则集合。将 `rules` 目录放在 Mihomo 配置目录中，并合并以下配置；把 `PROXY` 替换成已有代理组名。规则应放在其他兜底规则之前。
+使用 [hghubx.list](hghubx.list)，这是 `classical` 行为、`text` 格式的规则集合。将 `rules` 目录放在 Mihomo 配置目录中，并合并以下配置；把 `PROXY` 替换成已有代理组名。规则应放在其他兜底规则之前。
 
 ```yaml
 rule-providers:
-  hghub:
+  hghubx:
     type: file
     behavior: classical
     format: text
-    path: ./rules/hghub.list
+    path: ./rules/hghubx.list
 
 rules:
-  - RULE-SET,hghub,PROXY
+  - RULE-SET,hghubx,PROXY
 ```
 
 也可通过 HTTP 托管该文件后使用 `type: http`，填写实际 `url` 和更新周期。`.list` 不包含策略名，不要直接作为完整的 `rules:` 配置粘贴。
 
 ## sing-box
 
-使用 [hghub.json](hghub.json)，源规则集版本为 2，适用于 sing-box 1.10 及以上。将目录放在配置目录中，合并到现有 `route`；把 `proxy` 替换成实际出站标签，放在兜底规则之前。
+使用 [hghubx.json](hghubx.json)，源规则集版本为 2，适用于 sing-box 1.10 及以上。将目录放在配置目录中，合并到现有 `route`；把 `proxy` 替换成实际出站标签，放在兜底规则之前。
 
 ```json
 {
@@ -47,14 +47,14 @@ rules:
     "rule_set": [
       {
         "type": "local",
-        "tag": "hghub",
+        "tag": "hghubx",
         "format": "source",
-        "path": "./rules/hghub.json"
+        "path": "./rules/hghubx.json"
       }
     ],
     "rules": [
       {
-        "rule_set": ["hghub"],
+        "rule_set": ["hghubx"],
         "action": "route",
         "outbound": "proxy"
       }
@@ -65,10 +65,10 @@ rules:
 
 以上路由动作写法适用于 sing-box 1.11 及以上；1.10 使用相同源规则集时，删除路由项中的 `"action": "route"`。
 
-需要二进制规则集时可使用已编译的 [hghub.srs](hghub.srs)，将配置的 `format` 改为 `binary`、`path` 改为 `./rules/hghub.srs`。修改 JSON 后重新编译：
+需要二进制规则集时可使用已编译的 [hghubx.srs](hghubx.srs)，将配置的 `format` 改为 `binary`、`path` 改为 `./rules/hghubx.srs`。修改 JSON 后重新编译：
 
 ```sh
-sing-box rule-set compile --output rules/hghub.srs rules/hghub.json
+sing-box rule-set compile --output rules/hghubx.srs rules/hghubx.json
 ```
 
 ## IP/CIDR 与本地协议

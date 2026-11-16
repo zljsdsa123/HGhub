@@ -32,9 +32,11 @@ const VERDICT_TEXT: Record<string, string> = {
   dns_fail: "DNS 解析失败",
   dns_false_alarm: "DNS 探测异常，但实际可通",
   dns_hijack: "DNS 被劫持到内网 / 保留地址",
-  tcp_timeout: "TCP 无响应（SYN 被丢弃）",
-  tcp_refused: "TCP 被拒绝",
-  tls_intercept: "TLS / 证书异常（疑似中间人）",
+  tcp_timeout: "直连 TCP 探测超时",
+  tcp_refused: "直连 TCP 探测被拒",
+  tls_intercept: "TLS 证书校验失败",
+  tls_fail: "TLS 握手失败",
+  proxy_fail: "代理请求失败",
   http_fail: "HTTP 请求失败",
   http_status: "服务端返回错误状态码",
   unknown: "信息不足",
@@ -53,7 +55,7 @@ export function formatNetDiag(raw: Json): string {
 
   /* ── 头部：时间 + 结论 ── */
   const when = new Date().toLocaleString("zh-CN", { hour12: false });
-  lines.push(`【HGhub 网络诊断】${when}`);
+  lines.push(`【HGhubX 网络诊断】${when}`);
   lines.push("");
   lines.push(`结论：${summary || VERDICT_TEXT[verdict] || verdict}`);
   lines.push(`代码：${verdict}（${VERDICT_TEXT[verdict] ?? "未归类"}）`);
@@ -92,7 +94,9 @@ export function formatNetDiag(raw: Json): string {
   } else {
     const ok = tcp.ok === true;
     const state = ok ? "可连接" : tcp.timeout ? "超时（无响应）" : "失败";
-    lines.push(`${pad("状态")}${state} · ${ms(tcp.ms)}`);
+    const path = tcp.proxy_bypassed === true ? "直连探测（绕过应用 HTTP 代理）" : "独立 TCP socket 探测";
+    const family = str(tcp.family) ? `${str(tcp.family)} · ` : "";
+    lines.push(`${pad("状态")}${path} · ${family}${state} · ${ms(tcp.ms)}`);
     if (str(tcp.addr)) lines.push(`${pad("目标")}${str(tcp.addr)}`);
     if (str(tcp.error)) lines.push(`${pad("错误")}${str(tcp.error)}`);
   }
@@ -103,9 +107,19 @@ export function formatNetDiag(raw: Json): string {
   const status = num(http.status);
   if (status != null) lines.push(`${pad("状态")}${status} · ${ms(http.ms)}`);
   else lines.push(`${pad("状态")}失败 · ${ms(http.ms)}`);
+  lines.push(`${pad("代理路径")}${http.proxy_configured === true ? "检测到匹配的应用 HTTP 代理配置" : http.proxy_configured === false ? "未检测到应用 HTTP 代理配置（VPN/TUN 仍可能接管）" : "未记录"}`);
   if (str(http.kind)) lines.push(`${pad("错误类型")}${str(http.kind)}`);
   if (str(http.error)) lines.push(`${pad("错误")}${str(http.error)}`);
   lines.push("");
+
+  /* ── 应用代理 ── */
+  if (str(env.app_proxy_mode)) {
+    const labels: Record<string, string> = { system: "跟随系统", custom: "自定义代理", off: "直连" };
+    lines.push("── 应用代理 ──────────────────────");
+    lines.push(`${pad("模式")}${labels[str(env.app_proxy_mode)] || str(env.app_proxy_mode)}`);
+    if (str(env.app_proxy)) lines.push(`${pad("出口")}${str(env.app_proxy)}`);
+    lines.push("");
+  }
 
   /* ── 代理环境变量 ── */
   const envLines = Object.entries(env)

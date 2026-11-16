@@ -1,13 +1,17 @@
-import { useEffect, useImperativeHandle, useRef, forwardRef, useState } from "react";
+import { useEffect, useLayoutEffect, useImperativeHandle, useRef, forwardRef, useState } from "react";
 import Hls from "hls.js";
-import { isLocalMedia, platform, playlist } from "../api";
+import { platform } from "../api";
+import { connectNativeMedia, playbackSource } from "../mediaTransport";
 import { mediaErrorMessage } from "../mediaErrors";
 import { mediaHost, mediaResource, observeHls, usePlayerDiagnostics } from "../playbackDiagnostics";
 import { usePlaybackActivity } from "../usePlaybackActivity";
+import { useProxyPlaybackRecovery } from "../useProxyPlaybackRecovery";
+import { createHlsRecovery, type HlsRecovery } from "../hlsRecovery";
 
 export type VideoHandle = {
   el: () => HTMLVideoElement | null;
   play: () => void;
+  retry: () => void;
   pause: () => void;
   toggle: () => void;
   seek: (t: number, source?: string) => void;
@@ -22,6 +26,7 @@ type Props = {
   poster?: string;
   autoPlay?: boolean;
   active?: boolean;
+  measurementKey?: string;
   diagnosticContext?: Record<string, unknown>;
   muted?: boolean;
   loop?: boolean;
@@ -31,7 +36,7 @@ type Props = {
   rate?: number;
   onTime?: (t: number) => void;
   onDuration?: (d: number) => void;
-  onSize?: (w: number, h: number) => void;
+  onSize?: (w: number, h: number, measurementKey: string) => boolean | void;
   onPlaying?: () => void;
   onPause?: () => void;
   onWaiting?: () => void;
@@ -43,29 +48,49 @@ type Props = {
 
 /** 只负责「播」：hls.js + video 元素，控制条由外层渲染。 */
 const VideoSurface = forwardRef<VideoHandle, Props>(function VideoSurface(
-  { src, poster, autoPlay = true, active = true, diagnosticContext = {}, muted = false, loop = false, fit = "contain", volume = 1, rate = 1,
+  { src, poster, autoPlay = true, active = true, measurementKey = src, diagnosticContext = {}, muted = false, loop = false, fit = "contain", volume = 1, rate = 1,
     onTime, onDuration, onSize, onPlaying, onPause, onWaiting, onEnded, onError, onClick, className = "" },
   ref,
 ) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const latestSource = useRef(src); latestSource.current = src;
+  const attachedSource = useRef<string | null>(null);
   const hlsRef = useRef<Hls | null>(null);
-  const recoverCountRef = useRef(0);
-  const recoverTimerRef = useRef<number | null>(null);
+  const recoveryRef = useRef<HlsRecovery | null>(null);
   const nearEndFiredRef = useRef(false);
+  const reportedSizeRef = useRef({ key: "", w: 0, h: 0 });
+  const measurementRef = useRef({ key: measurementKey, onSize });
+  measurementRef.current = { key: measurementKey, onSize };
   const [ready, setReady] = useState(false);
   const { trace, requestSeek } = usePlayerDiagnostics(videoRef, hlsRef, { ...diagnosticContext, active, resource: mediaResource(src) });
   const activity = usePlaybackActivity(videoRef, hlsRef, { active, autoPlay, src, trace });
+  const proxyRecovery = useProxyPlaybackRecovery(videoRef, src, activity, trace);
 
   const reportSize = (v: HTMLVideoElement | null) => {
-    if (!v) return;
+    if (!v || v !== videoRef.current || attachedSource.current !== latestSource.current || v.readyState < 1) return;
     const w = v.videoWidth || 0;
     const h = v.videoHeight || 0;
-    if (w > 0 && h > 0) onSize?.(w, h);
+    const current = measurementRef.current;
+    if (w > 0 && h > 0 && (current.key !== reportedSizeRef.current.key || w !== reportedSizeRef.current.w || h !== reportedSizeRef.current.h)) {
+      // A parent may reject an event during an item transition. Keep it eligible
+      // for the next metadata/resize event instead of losing the size forever.
+      if (current.onSize?.(w, h, current.key) !== false) {
+        reportedSizeRef.current = { key: current.key, w, h };
+      }
+    }
   };
+
+  useLayoutEffect(() => {
+    // Re-emit existing metadata when the same source becomes current again.
+    // A newly selected source is ignored until its transport has been attached.
+    reportedSizeRef.current = { key: "", w: 0, h: 0 };
+    reportSize(videoRef.current);
+  }, [measurementKey, src, active]);
 
   useImperativeHandle(ref, () => ({
     el: () => videoRef.current,
     play: () => activity.play("handle"),
+    retry: () => { if (activity.isActive()) proxyRecovery.retry("manual", true); },
     pause: () => activity.pause(),
     toggle: () => {
       const v = videoRef.current;
@@ -95,17 +120,18 @@ const VideoSurface = forwardRef<VideoHandle, Props>(function VideoSurface(
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !src) return;
+    attachedSource.current = null;
     setReady(false);
+    reportedSizeRef.current = { key: "", w: 0, h: 0 };
     nearEndFiredRef.current = false;
-    recoverCountRef.current = 0;
+    const resume = proxyRecovery.resume();
     const onVideoResize = () => reportSize(video);
     video.addEventListener("resize", onVideoResize);
     if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
 
-    const proxied = isLocalMedia(src);
-    const url = proxied ? src : playlist(src);
-    const useHls = !url.includes("/seg?u=");
-    trace("source.load", { engine: useHls && Hls.isSupported() ? "hls.js" : "native", auto_play: autoPlay, resource: mediaResource(src), host: mediaHost(src) });
+    const source = playbackSource(src, Hls.isSupported());
+    let disconnectNative: (() => void) | undefined;
+    trace("source.load", { engine: source.engine, auto_play: autoPlay, resource: mediaResource(src), host: mediaHost(src) });
 
     /* 换源时先把音量/倍速套回去：hls 重新 attach 后浏览器会把它们重置成默认值 */
     const applySettings = () => {
@@ -116,8 +142,9 @@ const VideoSurface = forwardRef<VideoHandle, Props>(function VideoSurface(
       v.playbackRate = rate;
     };
     applySettings();
+    attachedSource.current = src;
 
-    if (useHls && Hls.isSupported()) {
+    if (source.engine === "hls.js") {
       const hls = new Hls({
         // 禁用从插播/内容引导 JSON 派生直连 URL 的可选功能。
         interstitialsController: undefined,
@@ -128,6 +155,7 @@ const VideoSurface = forwardRef<VideoHandle, Props>(function VideoSurface(
         // Prefer standard MSE on macOS; hls.js handles MMS-only fallback and seek recovery.
         preferManagedMediaSource: false,
         autoStartLoad: false,
+        startPosition: resume?.time ?? -1,
         maxBufferLength: 30,
         maxMaxBufferLength: 60,
         backBufferLength: 30,
@@ -141,56 +169,48 @@ const VideoSurface = forwardRef<VideoHandle, Props>(function VideoSurface(
         fragLoadingRetryDelay: 400,
       });
       hlsRef.current = hls;
+      const recovery = createHlsRecovery({
+        hls, video, url: source.url,
+        isCurrent: () => hlsRef.current === hls,
+        isActive: activity.isActive,
+        resumePlayback: () => activity.play("media_recovery", true),
+        onFatal: data => {
+          onError?.(`${data.type}/${data.details}`);
+          if (data.type !== Hls.ErrorTypes.NETWORK_ERROR && data.type !== Hls.ErrorTypes.MEDIA_ERROR) {
+            hls.destroy(); hlsRef.current = null;
+          }
+        },
+      });
+      recoveryRef.current = recovery;
       observeHls(hls, trace);
-      hls.loadSource(url);
+      hls.loadSource(source.url);
       hls.attachMedia(video);
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
-        if (activity.isActive()) hls.startLoad();
-        if (autoPlay) activity.play("manifest_autoplay", true);
+        if (activity.isActive()) hls.startLoad(resume?.time ?? -1);
+        if (autoPlay && !resume) activity.play("manifest_autoplay", true);
       });
-      hls.on(Hls.Events.FRAG_BUFFERED, () => { recoverCountRef.current = 0; });
-      hls.on(Hls.Events.ERROR, (_e, data) => {
-        if (!data.fatal) {
-          if (
-            data.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR ||
-            data.details === Hls.ErrorDetails.FRAG_LOAD_ERROR
-          ) {
-            try { hls.startLoad(video.currentTime || -1); } catch { /* ignore */ }
-          }
-          return;
-        }
-        if (!activity.isActive()) return;
-        const retry = () => {
-          recoverCountRef.current += 1;
-          const delay = 250 * recoverCountRef.current;
-          if (recoverTimerRef.current) window.clearTimeout(recoverTimerRef.current);
-          recoverTimerRef.current = window.setTimeout(() => {
-            try {
-              if (data.type === Hls.ErrorTypes.NETWORK_ERROR) hls.startLoad(video.currentTime || -1);
-              else hls.recoverMediaError();
-            } catch { /* ignore */ }
-          }, delay);
-        };
-        if (data.type === Hls.ErrorTypes.NETWORK_ERROR && recoverCountRef.current < 4) { retry(); return; }
-        if (data.type === Hls.ErrorTypes.MEDIA_ERROR && recoverCountRef.current < 4) { retry(); return; }
-        onError?.(`${data.type}/${data.details}`);
-        if (data.type === Hls.ErrorTypes.NETWORK_ERROR) hls.startLoad();
-        else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError();
-        else { hls.destroy(); hlsRef.current = null; }
-      });
+      hls.on(Hls.Events.FRAG_BUFFERED, () => recovery.buffered());
+      hls.on(Hls.Events.ERROR, (_e, data) => recovery.error(data));
     } else {
-      video.src = url;
-      if (autoPlay) activity.play("native_autoplay", true);
+      disconnectNative = connectNativeMedia(video, source, {
+        isCurrent: () => latestSource.current === src && videoRef.current === video,
+        onReady: () => { if (activity.isPlayWanted() && !resume) activity.play("native_autoplay", true); },
+        onError: message => { trace("source.transport_error"); onError?.(message); },
+      });
     }
 
     return () => {
+      attachedSource.current = null;
+      disconnectNative?.();
       video.removeEventListener("resize", onVideoResize);
-      if (recoverTimerRef.current) { window.clearTimeout(recoverTimerRef.current); recoverTimerRef.current = null; }
+      recoveryRef.current?.dispose(); recoveryRef.current = null;
       trace("source.cleanup");
       if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [src]);
+  }, [src, proxyRecovery.revision]);
+
+  useLayoutEffect(() => { recoveryRef.current?.activityChanged(); }, [active]);
 
   // iOS 内联播放：部分 WKWebView 只认 HTML 属性
   useEffect(() => {

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 64 64" role="img" aria-labelledby="hghubx-title hghubx-desc">
+<title id="hghubx-title">HGhubX · 深色 X</title><desc id="hghubx-desc">HGhubX 应用图标，沿用原项目蓝色体系，使用 X 标识衍生版本。</desc>
+<defs><linearGradient id="x-night" x1="4" y1="0" x2="60" y2="64" gradientUnits="userSpaceOnUse"><stop stop-color="#06465b"/><stop offset="1" stop-color="#002837"/></linearGradient></defs>
+<rect width="64" height="64" rx="17.455" fill="url(#x-night)"/>
+<rect x=".65" y=".65" width="62.7" height="62.7" rx="16.8" fill="none" stroke="#60cdff" stroke-opacity=".14" stroke-width=".8"/><g transform="translate(-2.909091 -2.909091) scale(1.4545455)">
+<path d="M14 13v22M14 24h10M24 13v22" stroke="#60cdff" stroke-width="4.4" stroke-linecap="round" fill="none"/>
+<path d="M31 17.5c3.2 0 5.5 2.6 5.5 6.5S34.2 30.5 31 30.5" stroke="#60cdff" stroke-width="4" stroke-linecap="round" fill="none"/>
+</g><path d="M40 27.2 46.3 31.9 40 36.6Z" fill="#b1f5dc"/>
+<path d="M46.7 11.3 52.5 17.1M52.5 11.3 46.7 17.1" stroke="#b1f5dc" stroke-width="2.9" stroke-linecap="round"/></svg>

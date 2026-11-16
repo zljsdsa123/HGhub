@@ -1,100 +1,75 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { LiquidIndicator, Loader } from "./components/ios/effects";
+import { Button } from "./components/ios/controls";
+import { lazy, Suspense, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useStore, type Page, type Tab } from "./store";
 import { isMobile, selfTest } from "./api";
 import { addPluginListener, invoke } from "@tauri-apps/api/core";
 import { runBack } from "./back";
 import Home from "./pages/Home";
-import Search, { RankPage } from "./pages/Search";
-import Category, { ChannelPage } from "./pages/Category";
-import Profile from "./pages/Profile";
-import SettingsPage from "./pages/Settings";
 import Feed from "./components/Feed";
-import { PostsPage, PostDetail } from "./pages/Posts";
-import { TopicsPage, TopicPage, TagsPage, TagPage } from "./pages/Discover";
-import { FollowingPage, UserPage } from "./pages/User";
 import LoginModal from "./components/LoginModal";
 import CalculatorGate from "./components/CalculatorGate";
 import { ToastHost } from "./components/ui";
 import { DesktopRail, DesktopTitleBar } from "./components/DesktopChrome";
 import ResizeHandles from "./components/ResizeHandles";
 import { tracePlayback } from "./playbackDiagnostics";
-import { IGrid, IGridF, IHome, IHomeF, ISearch, IUser, IUserF, Logo } from "./icons";
+import { IGrid, IGridF, IHome, IHomeF, ISearch, IUser, IUserF } from "./icons";
 
-/* ============ 底部标签栏（移动端）—— iOS 26 液态玻璃悬浮胶囊 ============ */
-/* 设计对齐 liuran001/WeChat-LiquidGlass（iOS 26 风格）：
-   - 不贴边的悬浮胶囊玻璃条，内容透出真实折射感（backdrop blur + 高光内描边）
-   - 选中项是一枚「液滴」玻璃胶囊，用弹簧物理滑动跟随（无 JS 逐帧驱动，
-     用 CSS transition + cubic-bezier 近似 WeChat-LiquidGlass 的 DampedDragAnimation）
-   - 按压时液滴放大（对齐其 press scale 1.1x），图标带充色 */
+// Local chunks load on first visit; visited tabs stay mounted as before.
+const Search = lazy(() => import("./pages/Search"));
+const RankPage = lazy(() => import("./pages/Search").then(module => ({ default: module.RankPage })));
+const Category = lazy(() => import("./pages/Category"));
+const ChannelPage = lazy(() => import("./pages/Category").then(module => ({ default: module.ChannelPage })));
+const Profile = lazy(() => import("./pages/Profile"));
+const SettingsPage = lazy(() => import("./pages/Settings"));
+const PostsPage = lazy(() => import("./pages/Posts").then(module => ({ default: module.PostsPage })));
+const PostDetail = lazy(() => import("./pages/Posts").then(module => ({ default: module.PostDetail })));
+const TopicsPage = lazy(() => import("./pages/Discover").then(module => ({ default: module.TopicsPage })));
+const TopicPage = lazy(() => import("./pages/Discover").then(module => ({ default: module.TopicPage })));
+const TagsPage = lazy(() => import("./pages/Discover").then(module => ({ default: module.TagsPage })));
+const TagPage = lazy(() => import("./pages/Discover").then(module => ({ default: module.TagPage })));
+const FollowingPage = lazy(() => import("./pages/User").then(module => ({ default: module.FollowingPage })));
+const UserPage = lazy(() => import("./pages/User").then(module => ({ default: module.UserPage })));
+
+function PageLoading() {
+  return <div className="absolute inset-0 grid place-items-center bg-bg"><Loader label="页面加载中" /></div>;
+}
+
+const SELECTABLE_TEXT = 'input, textarea, [contenteditable="true"], .select-text, .article-body';
+const isSelectableText = (target: EventTarget | null) => target instanceof Element && !!target.closest(SELECTABLE_TEXT);
+
 function TabBar() {
-  const { tab, setTab, theme } = useStore();
-  const items: { k: Tab; label: string; On: (p: { size?: number; className?: string; style?: React.CSSProperties; strokeWidth?: number }) => React.JSX.Element; Off: (p: { size?: number; className?: string; style?: React.CSSProperties; strokeWidth?: number }) => React.JSX.Element }[] = [
-    { k: "home", label: "首页", On: IHomeF, Off: IHome },
-    { k: "search", label: "搜索", On: ISearch, Off: ISearch },
-    { k: "category", label: "分类", On: IGridF, Off: IGrid },
-    { k: "profile", label: "我的", On: IUserF, Off: IUser },
-  ];
-  const idx = items.findIndex((i) => i.k === tab);
-  const overVideo = tab === "home";
-  const light = !overVideo && theme === "light";
-  /* 液滴中心对齐每个等分槽位的中心，定位不受固定胶囊宽度影响。 */
-  const dropLeft = `${12.5 + idx * 25}%`;
-  return (
-    <nav className="hg-tabbar absolute inset-x-0 bottom-0 z-30 flex justify-center"
-      style={{ paddingBottom: "calc(var(--sab, 0px) * 0.55)" }} aria-label="主导航">
-      <div className="hg-glass relative" style={{
-        width: "min(92vw, 420px)",
-        height: 56,
-        borderRadius: 28,
-        background: light ? "rgba(250, 250, 250, .62)" : "rgba(22, 22, 24, .55)",
-        boxShadow: light
-          ? "0 8px 32px rgba(0,0,0,.12), 0 1px 0 rgba(255,255,255,.85) inset, 0 0 0 .5px rgba(0,0,0,.06)"
-          : "0 8px 32px rgba(0,0,0,.38), 0 1px 0 rgba(255,255,255,.16) inset, 0 0 0 .5px rgba(255,255,255,.10)",
-        backdropFilter: "blur(24px) saturate(180%)",
-        WebkitBackdropFilter: "blur(24px) saturate(180%)",
-      }}>
-        {/* 液滴：跟随选中项的玻璃胶囊 */}
-        <div className="hg-drop absolute top-[4px] bottom-[4px] w-[56px]" style={{
-          left: dropLeft,
-          transform: "translateX(-50%)",
-          borderRadius: 24,
-          transition: "left 480ms cubic-bezier(.32,1.35,.45,1)",
-          background: light ? "rgba(255,255,255,.92)" : "rgba(255,255,255,.14)",
-          boxShadow: light
-            ? "0 2px 10px rgba(0,0,0,.10), 0 0 0 .5px rgba(0,0,0,.05)"
-            : "0 1px 8px rgba(255,255,255,.08) inset, 0 0 0 .5px rgba(255,255,255,.22)",
-          backdropFilter: "blur(10px) brightness(1.12)",
-          WebkitBackdropFilter: "blur(10px) brightness(1.12)",
-        }} />
-        <div className="relative h-full grid grid-cols-4">
-          {items.map(({ k, label, On, Off }) => {
-            const on = tab === k;
-            const Icon = on ? On : Off;
-            return (
-              <button key={k} onClick={() => setTab(k)}
-                className="relative flex flex-col items-center justify-center gap-[2px] pressable"
-                aria-current={on ? "page" : undefined}>
-                <Icon size={21} style={{
-                  color: on ? "var(--p-primary)" : (light ? "rgba(0,0,0,.42)" : "rgba(255,255,255,.62)"),
-                  transition: "color 200ms, transform 320ms cubic-bezier(.32,1.35,.45,1)",
-                  transform: on ? "scale(1.08) translateY(-1px)" : "scale(1)",
-                }} />
-                <span className="text-[9.5px] leading-none" style={{
-                  fontWeight: on ? 700 : 500,
-                  color: on ? "var(--p-primary)" : (light ? "rgba(0,0,0,.42)" : "rgba(255,255,255,.62)"),
-                  transition: "color 200ms",
-                }}>{label}</span>
-              </button>
-            );
-          })}
-        </div>
+  const { tab, setTab, platform } = useStore();
+  const items = [
+    { key: "home", label: "首页", Icon: IHome, Active: IHomeF },
+    { key: "search", label: "搜索", Icon: ISearch, Active: ISearch },
+    { key: "category", label: "分类", Icon: IGrid, Active: IGridF },
+    { key: "profile", label: "我的", Icon: IUser, Active: IUserF },
+  ] as const;
+  const index = items.findIndex(item => item.key === tab);
+  return <nav className="hg-tabbar ios-mobile-nav" aria-label="主导航" data-over-video={tab === "home"}
+    style={{ paddingBottom: platform === "android" ? "var(--sab, 16px)" : "calc(var(--sab, 16px) * .55)" }}>
+      <div className="hg-glass">
+      <div className="hg-drop" aria-hidden="true" style={{ transform: `translateX(${index * 100}%)` }}><LiquidIndicator /></div>
+      <div className="ios-mobile-nav-items">
+        {items.map(({ key, label, Icon, Active }) => {
+          const Glyph = tab === key ? Active : Icon;
+          return <Button key={key} className="ios-mobile-nav-item" onClick={() => setTab(key)}
+            aria-current={tab === key ? "page" : undefined}>
+            <Glyph size={22} /><span>{label}</span>
+          </Button>;
+        })}
       </div>
-    </nav>
-  );
+    </div>
+  </nav>;
 }
 
 /* ============ 堆栈页面 ============ */
-function StackPage({ page, onBack, wide, top, bottomInset }: {
+function StackPage(props: Parameters<typeof StackPageContent>[0]) {
+  return <Suspense fallback={<PageLoading />}><StackPageContent {...props} /></Suspense>;
+}
+
+function StackPageContent({ page, onBack, wide, top, bottomInset }: {
   page: Page; onBack: () => void; wide: boolean; top: boolean; bottomInset: number;
 }) {
   if (page.kind === "feed") {
@@ -106,7 +81,7 @@ function StackPage({ page, onBack, wide, top, bottomInset }: {
   }
   if (page.kind === "channel") return <ChannelPage cate={page.cate} name={page.name} onBack={onBack} wide={wide} />;
   if (page.kind === "ranks") return <RankPage onBack={onBack} wide={wide} />;
-  if (page.kind === "settings") return <SettingsPage onBack={onBack} wide={wide} />;
+  if (page.kind === "settings") return <SettingsPage onBack={onBack} wide={wide} initialSection={page.section} />;
   if (page.kind === "posts") return <PostsPage onBack={onBack} wide={wide} />;
   if (page.kind === "post") return <PostDetail id={page.id} onBack={onBack} active={top} />;
   if (page.kind === "topics") return <TopicsPage onBack={onBack} wide={wide} />;
@@ -119,6 +94,23 @@ function StackPage({ page, onBack, wide, top, bottomInset }: {
 }
 
 /* ============ 应用主体 ============ */
+function MainTabs({ wide, pageActive, bottomInset }: { wide: boolean; pageActive: boolean; bottomInset: number }) {
+  const { tab } = useStore();
+  const [visited, setVisited] = useState<ReadonlySet<Tab>>(() => new Set());
+  useEffect(() => {
+    if (pageActive) setVisited(previous => previous.has(tab) ? previous : new Set([...previous, tab]));
+  }, [tab, pageActive]);
+  const mounted = (key: Tab) => visited.has(key) || (pageActive && tab === key);
+  const visible = (key: Tab) => tab === key ? `absolute inset-0 ${key === "home" ? "" : "ios-tab-active"}` : "absolute inset-0 hidden pointer-events-none";
+  // First visits mount on demand; subsequent switches preserve queries, scroll and playback state.
+  return <>
+    <div className={visible("home")} inert={!pageActive || tab !== "home"} aria-hidden={!pageActive || tab !== "home"}>{mounted("home") && <Home active={pageActive && tab === "home"} bottomInset={bottomInset} />}</div>
+    <div className={visible("search")} inert={!pageActive || tab !== "search"} aria-hidden={!pageActive || tab !== "search"}>{mounted("search") && <Suspense fallback={<PageLoading />}><Search active={pageActive && tab === "search"} wide={wide} /></Suspense>}</div>
+    <div className={visible("category")} inert={!pageActive || tab !== "category"} aria-hidden={!pageActive || tab !== "category"}>{mounted("category") && <Suspense fallback={<PageLoading />}><Category wide={wide} active={pageActive && tab === "category"} /></Suspense>}</div>
+    <div className={visible("profile")} inert={!pageActive || tab !== "profile"} aria-hidden={!pageActive || tab !== "profile"}>{mounted("profile") && <Suspense fallback={<PageLoading />}><Profile wide={wide} /></Suspense>}</div>
+  </>;
+}
+
 function AppBody() {
   const { platform, tab, setTab, stack, pop, loginOpen, setLoginOpen, fs, clean } = useStore();
   const mainRef = useRef<HTMLDivElement>(null);
@@ -153,7 +145,6 @@ function AppBody() {
     return () => window.removeEventListener("keydown", fn);
   }, [stack.length, pop, setTab, loginOpen, setLoginOpen]);
 
-  const vis = (k: Tab) => (tab === k ? "absolute inset-0" : "absolute inset-0 invisible pointer-events-none");
   const pageActive = stack.length === 0 && !loginOpen;
   const bottomInset = isMobile ? (fs || clean ? 0 : 74) : 14;
   /* 栈页（从搜索/分类/我的进入的播放页、图文页）没有底栏，
@@ -165,13 +156,10 @@ function AppBody() {
     <div className={`absolute inset-0 flex bg-canvas plat-${platform}`}>
       {!isMobile && <DesktopRail collapsed={collapsed} />}
       <div ref={mainRef} className="relative flex-1 min-w-0 overflow-hidden win-main">
-        <div className={vis("home")}><Home active={pageActive && tab === "home"} bottomInset={bottomInset} /></div>
-        <div className={vis("search")}><Search active={pageActive && tab === "search"} wide={wide} /></div>
-        <div className={vis("category")}><Category wide={wide} active={pageActive && tab === "category"} /></div>
-        <div className={vis("profile")}><Profile wide={wide} /></div>
+        <MainTabs wide={wide} pageActive={pageActive} bottomInset={bottomInset} />
 
         {stack.map((p, i) => (
-          <div key={p.key} className="absolute inset-0 z-30 bg-bg a-page-in" style={{ boxShadow: "-18px 0 40px rgba(0,0,0,.5)" }}>
+          <div key={p.key} inert={i !== stack.length - 1 || loginOpen} aria-hidden={i !== stack.length - 1 || loginOpen} className="absolute inset-0 z-30 bg-bg a-page-in" style={{ boxShadow: "-18px 0 40px rgba(0,0,0,.5)" }}>
             <StackPage page={p} onBack={pop} wide={wide} top={i === stack.length - 1} bottomInset={stackInset} />
           </div>
         ))}
@@ -184,7 +172,13 @@ function AppBody() {
 
 /* ============ 桌面窗口壳（Windows / macOS / Linux）============ */
 function DesktopShell() {
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(() => window.innerWidth < 1100);
+  useEffect(() => {
+    const query = matchMedia("(max-width: 1099px)");
+    const update = () => setCollapsed(query.matches);
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  }, []);
   const { theater, platform } = useStore();
   return (
     <div className={`absolute inset-0 flex flex-col bg-canvas win-root plat-${platform}`}>
@@ -230,19 +224,15 @@ function ShellInner({ collapsed, theater }: { collapsed: boolean; theater: boole
     return () => window.removeEventListener("keydown", fn);
   }, [stack.length, pop, setTab, loginOpen, setLoginOpen]);
 
-  const vis = (k: Tab) => (tab === k ? "absolute inset-0" : "absolute inset-0 invisible pointer-events-none");
   const pageActive = stack.length === 0 && !loginOpen;
 
   return (
     <div className={`absolute inset-0 flex bg-canvas plat-${platform}`}>
       {!theater && <DesktopRail collapsed={collapsed} />}
       <div ref={mainRef} className={`relative flex-1 min-w-0 overflow-hidden win-main ${theater ? "is-theater-main" : ""}`}>
-        <div className={vis("home")}><Home active={pageActive && tab === "home"} bottomInset={14} /></div>
-        <div className={vis("search")}><Search active={pageActive && tab === "search"} wide={wide} /></div>
-        <div className={vis("category")}><Category wide={wide} active={pageActive && tab === "category"} /></div>
-        <div className={vis("profile")}><Profile wide={wide} /></div>
+        <MainTabs wide={wide} pageActive={pageActive} bottomInset={14} />
         {stack.map((p, i) => (
-          <div key={p.key} className="absolute inset-0 z-30 bg-bg win-page-in" style={{ boxShadow: "-18px 0 40px rgba(0,0,0,.5)" }}>
+          <div key={p.key} inert={i !== stack.length - 1 || loginOpen} aria-hidden={i !== stack.length - 1 || loginOpen} className="absolute inset-0 z-30 bg-bg win-page-in" style={{ boxShadow: "-18px 0 40px rgba(0,0,0,.5)" }}>
             <StackPage page={p} onBack={pop} wide={wide} top={i === stack.length - 1} bottomInset={14} />
           </div>
         ))}
@@ -256,7 +246,7 @@ function MobileShell() {
   const { platform } = useStore();
   return (
     <div className={`absolute inset-0 flex flex-col bg-canvas plat-${platform}`}
-      style={{ "--sat": "max(env(safe-area-inset-top), 12px)", "--sab": "max(env(safe-area-inset-bottom), 16px)" } as React.CSSProperties}>
+      style={{ "--sat": "max(env(safe-area-inset-top), 12px)", "--sab": platform === "android" ? "max(env(safe-area-inset-bottom), 24px)" : "max(env(safe-area-inset-bottom), 16px)" } as React.CSSProperties}>
       <div className="relative flex-1 min-h-0">
         <AppBody />
       </div>
@@ -272,7 +262,7 @@ export default function App() {
     tracePlayback("navigation.change", { tab, stack: stack.map(p => ({ page: p.kind, key: p.key })), login_open: loginOpen });
   }, [tab, stack, loginOpen]);
 
-  /* 离开应用时暂停并卸载真实首页；每次回到前台都重新显示计算器。 */
+/* 离开应用时暂停并卸载真实首页；每次回到前台都重新显示计算器。 */
   useEffect(() => {
     const lock = () => {
       setUnlocked(false);
@@ -292,40 +282,43 @@ export default function App() {
     };
   }, [setTab, setLoginOpen, setFs, setClean]);
 
-  /* iOS：长按快进会触发 WKWebView 系统文本选择放大镜（loupe），纯 CSS 挡不住。
-     原生层已默认关闭文本交互（isTextInteractionEnabled=false）；这里在用户触碰输入框时
-     重新打开、失焦时再关闭，避免影响搜索/评论/登录等文本输入。 */
+  /* iOS keeps player gestures free of selection handles while inputs and reading text
+     retain native selection/copy. Pointer targeting also handles non-focusable articles. */
   useEffect(() => {
     if (platform !== "ios") return;
-    const setTI = (enabled: boolean) => invoke("set_text_interaction", { enabled }).catch(() => {});
-    const INPUTS = 'input, textarea, [contenteditable="true"]';
-    const onDown = (e: Event) => {
-      const t = e.target as HTMLElement | null;
-      if (t && typeof t.closest === "function" && t.closest(INPUTS)) setTI(true);
+    let last: boolean | null = null;
+    const setTI = (enabled: boolean) => {
+      if (last === enabled) return;
+      last = enabled;
+      invoke("set_text_interaction", { enabled }).catch(() => { last = null; });
     };
+    const onDown = (e: Event) => setTI(isSelectableText(e.target));
     const onFocusOut = (e: FocusEvent) => {
-      const t = e.target as HTMLElement | null;
-      if (t && typeof t.closest === "function" && t.closest(INPUTS)) setTI(false);
+      // A touch on an article can blur an input with relatedTarget=null after pointerdown.
+      // Keep that pointer decision; the next control interaction explicitly disables selection.
+      if (e.relatedTarget) setTI(isSelectableText(e.relatedTarget));
     };
     document.addEventListener("touchstart", onDown, { capture: true, passive: true });
     document.addEventListener("pointerdown", onDown, { capture: true, passive: true });
+    document.addEventListener("focusin", onDown, true);
     document.addEventListener("focusout", onFocusOut, true);
     return () => {
       document.removeEventListener("touchstart", onDown, true);
       document.removeEventListener("pointerdown", onDown, true);
+      document.removeEventListener("focusin", onDown, true);
       document.removeEventListener("focusout", onFocusOut, true);
     };
   }, [platform]);
 
   /* —— 安卓硬件返回键 ——
-     层级：全屏 → 面板/弹层 → 登录框 → 页面栈 → 回首页 → 退出应用。
+     层级：面板/弹层 → 全屏 → 登录框 → 页面栈 → 回首页 → 退出应用。
      不注册这个监听，Tauri 会直接 webView.goBack() 或退出，表现就是「任意页面返回都回桌面」。 */
   const backRef = useRef<() => void>(() => {});
   backRef.current = () => {
     if (!unlocked) return;                                  // 伪装计算器状态不退出应用
+    if (runBack()) return;                                  // 最上层弹窗/播放器面板
     if (fs) { setFs(false); return; }                        // 沉浸全屏
     if (document.fullscreenElement) { document.exitFullscreen().catch(() => {}); return; }
-    if (runBack()) return;                                  // 播放器的选集/评论/图文面板
     if (loginOpen) { setLoginOpen(false); return; }
     if (stack.length) { pop(); return; }
     if (tab !== "home") { setTab("home"); return; }
@@ -346,7 +339,7 @@ export default function App() {
   }, [platform]);
 
   useEffect(() => {
-    const prevent = (e: Event) => e.preventDefault();
+    const prevent = (e: Event) => { if (!isSelectableText(e.target)) e.preventDefault(); };
     document.addEventListener("contextmenu", prevent);
     return () => document.removeEventListener("contextmenu", prevent);
   }, []);
@@ -366,8 +359,6 @@ export default function App() {
       {isMobile ? <MobileShell /> : <DesktopShell />}
       <LoginModal />
       <ToastHost />
-      {/* 登录遮罩键盘处理占位 */}
-      {loginOpen && <div className="hidden" onClick={() => setLoginOpen(false)} />}
     </>
   );
 }

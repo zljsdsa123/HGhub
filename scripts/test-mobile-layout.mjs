@@ -26,15 +26,18 @@ try {
   await context.addInitScript(() => {
     const fixture = { calls: [], unexpected: [] };
     const emptyPage = { items: [], pagination: { page: 1, pages: 1, size: 8, total: 0 } };
+    localStorage.setItem("hghubx_usage_agreement", JSON.stringify({
+      version: "2026-11-15-v1", accepted: true, acceptedAt: "2026-11-15T00:00:00.000Z",
+    }));
     Object.assign(window, {
       mobileLayoutFixture: fixture,
       __TAURI_INTERNALS__: { invoke(cmd, args = {}) {
         fixture.calls.push({ cmd, args });
         if (cmd === "app_boot") return Promise.resolve({ user: null, logged_in: false, base: "https://fixture.invalid", strict_security: true });
         if (cmd === "playback_log_status") return Promise.resolve({ enabled: false, path: null, error: null });
-        if (cmd === "debug_log") return Promise.resolve();
+        if (["debug_log", "set_text_interaction"].includes(cmd)) return Promise.resolve();
         if (cmd === "line_auto") return Promise.resolve({ base: "https://fixture.invalid", previous: "https://fixture.invalid", switched: false, pick: { tier: "main", ms: 1, reason: "fixture", candidates: [] } });
-        if (["api_feed", "api_category", "api_posts", "api_search_hot"].includes(cmd)) return Promise.resolve(emptyPage);
+        if (["api_feed", "api_category", "api_posts", "api_original_videos", "api_post_category", "api_search_hot"].includes(cmd)) return Promise.resolve(emptyPage);
         // App's development-only playback self-test must not fetch media upstream.
         if (cmd === "api_play") return Promise.reject("Layout fixture has no playback media");
         fixture.unexpected.push(cmd);
@@ -96,7 +99,7 @@ try {
 } finally {
   await writeFile(join(output, "report.json"), JSON.stringify(report, null, 2));
   const escape = text => String(text).replace(/[&<>\"]/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[char]);
-  await writeFile(join(output, "report.html"), `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>HGhub mobile navigation layout</title><style>body{margin:24px;font:16px system-ui;background:#151515;color:#eee}h2{margin-top:32px}.tabs{display:grid;gap:12px;grid-template-columns:repeat(2,minmax(250px,1fr));max-width:1050px}figure{margin:0;padding:12px;background:#252525;border-radius:12px}img{display:block;max-width:100%;height:auto;margin-top:8px}a{color:#79cfff}pre{white-space:pre-wrap}</style><h1>HGhub mobile navigation layout: ${report.passed ? "PASS" : "FAIL"}</h1><p>${escape(report.environment.transport)}. ${escape(report.environment.limitation)}.</p>${report.error ? `<pre>${escape(report.error)}</pre>` : ""}${report.cases.map(result => `<h2>${result.viewport.width} × ${result.viewport.height}</h2><a href="${result.screenshot || "failure.png"}">Full viewport screenshot</a><div class="tabs">${result.tabs.map(tab => `<figure><figcaption>${escape(tab.name)} — center error ${tab.centerDelta.toFixed(3)} px</figcaption><img src="${tab.screenshot}" alt="${escape(tab.name)} navigation highlight"></figure>`).join("")}</div>`).join("")}<p><a href="report.json">JSON measurements</a></p></html>`);
+  await writeFile(join(output, "report.html"), `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>HGhubX mobile navigation layout</title><style>body{margin:24px;font:16px system-ui;background:#151515;color:#eee}h2{margin-top:32px}.tabs{display:grid;gap:12px;grid-template-columns:repeat(2,minmax(250px,1fr));max-width:1050px}figure{margin:0;padding:12px;background:#252525;border-radius:12px}img{display:block;max-width:100%;height:auto;margin-top:8px}a{color:#79cfff}pre{white-space:pre-wrap}</style><h1>HGhubX mobile navigation layout: ${report.passed ? "PASS" : "FAIL"}</h1><p>${escape(report.environment.transport)}. ${escape(report.environment.limitation)}.</p>${report.error ? `<pre>${escape(report.error)}</pre>` : ""}${report.cases.map(result => `<h2>${result.viewport.width} × ${result.viewport.height}</h2><a href="${result.screenshot || "failure.png"}">Full viewport screenshot</a><div class="tabs">${result.tabs.map(tab => `<figure><figcaption>${escape(tab.name)} — center error ${tab.centerDelta.toFixed(3)} px</figcaption><img src="${tab.screenshot}" alt="${escape(tab.name)} navigation highlight"></figure>`).join("")}</div>`).join("")}<p><a href="report.json">JSON measurements</a></p></html>`);
   await browser?.close();
   await vite?.close();
   console.log(`Artifacts: ${output}`);

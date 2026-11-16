@@ -1,6 +1,7 @@
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
+import StartupGate from "./components/LaunchAnimation";
 import { AppProvider } from "./store";
 import { invoke } from "@tauri-apps/api/core";
 import "./index.css";
@@ -11,8 +12,6 @@ import Hls from "hls.js";
 import { installLayoutDiagnostics } from "./layoutDiagnostics";
 installPlaybackPageEvents();
 void initPlaybackLog();
-/* 自动选线：启动时比一次 com / ai，之后跟着网络变化复查 */
-initAutoLine();
 /* 环境指纹：写进始终记录的 debug.log。用户复制诊断时不用再自报版本、平台、内核版本 */
 logLine(
   `[env] ver=${APP_VERSION} platform=${platform} webview=${webviewVersion} ` +
@@ -45,11 +44,15 @@ window.addEventListener("unhandledrejection", (e) => {
    不再用 JS 在启动时钉死 html 高度——启动瞬间 visualViewport.height 尚未
    完成布局，抓到错误值会把 html 高度锁死，正是「底部留白、旋转一次才恢复」的根因。 */
 
+/** Account restore, line probes and content requests begin only after agreement. */
+function AcceptedApplication() {
+  React.useEffect(() => { initAutoLine(); }, []);
+  return <AppProvider><App /></AppProvider>;
+}
+
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <AppProvider>
-      <App />
-    </AppProvider>
+    <StartupGate><AcceptedApplication /></StartupGate>
   </React.StrictMode>,
 );
 installLayoutDiagnostics();

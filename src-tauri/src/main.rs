@@ -16,7 +16,7 @@ fn main() {
         }
     }
 
-    huangguo_client_lib::run()
+    hghubx_lib::run()
 }
 
 /// 检测「Intel 显示 + NVIDIA 独显」共存拓扑。

@@ -12,7 +12,7 @@ import re
 import sys
 
 LIB_NAME = sys.argv[1] if len(sys.argv) > 1 else "libapp.a"
-CRATE_LIB = "libhuangguo_client_lib.a"
+CRATE_LIB = "libhghubx_lib.a"
 TARGET = "aarch64-apple-ios"
 
 projects = glob.glob("src-tauri/gen/apple/*.xcodeproj/project.pbxproj")

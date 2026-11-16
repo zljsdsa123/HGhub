@@ -2,7 +2,8 @@
   "$schema": "https://schema.tauri.app/config/2",
   "app": {
     "security": {
-      "csp": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: hg: http://hg.localhost https://hg.localhost http://127.0.0.1:17650; media-src 'self' blob: hg: http://hg.localhost https://hg.localhost http://127.0.0.1:17650; connect-src ipc: http://ipc.localhost https://ipc.localhost hg: http://hg.localhost https://hg.localhost http://127.0.0.1:17650; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'"
+      "csp": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: hg: http://hg.localhost https://hg.localhost http://127.0.0.1:17650; media-src 'self' blob: hg: http://hg.localhost https://hg.localhost http://127.0.0.1:17650; connect-src ipc: http://ipc.localhost https://ipc.localhost hg: http://hg.localhost https://hg.localhost http://127.0.0.1:17650; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'",
+      "devCsp": "default-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: hg: http://hg.localhost https://hg.localhost http://127.0.0.1:17650; media-src 'self' blob: hg: http://hg.localhost https://hg.localhost http://127.0.0.1:17650; connect-src 'self' ws: wss: ipc: http://ipc.localhost https://ipc.localhost hg: http://hg.localhost https://hg.localhost http://127.0.0.1:17650; worker-src 'self' blob:; object-src 'none'; base-uri 'none'; form-action 'none'; frame-src 'none'"
     }
   },
   "bundle": {

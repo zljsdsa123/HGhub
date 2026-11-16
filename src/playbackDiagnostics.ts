@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useRef, useSyncExternalStore, type RefObject } from "react";
 import Hls from "hls.js";
 import type { FragBufferedData, FragLoadedData, FragLoadingData } from "hls.js";
+import { copyText } from "./clipboard";
 
 type Data = Record<string, unknown>;
 type Status = { enabled: boolean; path: string | null; error: string | null };
@@ -74,8 +75,7 @@ export async function copyPlaybackLog() {
   await flushPlaybackLog();
   const text = await playbackLogApi.read();
   if (!text) throw new Error("尚无诊断日志，请开启后复现问题");
-  if (!navigator.clipboard) throw new Error("当前环境无法使用剪贴板，请从日志目录取出 playback.log");
-  await navigator.clipboard.writeText(text);
+  await copyText(text);
 }
 
 export function mediaResource(raw: string) {

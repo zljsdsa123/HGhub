@@ -10,7 +10,8 @@ use aes::Aes128;
 use once_cell::sync::Lazy;
 use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::future::Future;
+use std::sync::{atomic::{AtomicU64, Ordering}, Arc, Mutex, Weak};
 use tauri::http::{Response, StatusCode};
 
 /// 本平台自定义协议的完整基址。
@@ -31,13 +32,111 @@ const IMG_IV: &[u8] = b"97b60394abc2fbe1";
 
 static IMG_CACHE: Lazy<Mutex<HashMap<String, Arc<Vec<u8>>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+type ImageResult = Result<(String, Arc<Vec<u8>>), String>;
+type ImageLoad = tokio::sync::OnceCell<ImageResult>;
+// 背景、视频 poster 和详情可能同时请求同一张图，共享下载和解密。
+// 弱引用不保留已完成任务/错误；图片重试仍可发起新的请求。
+static IMG_LOADING: Lazy<Mutex<HashMap<(u64, String), Weak<ImageLoad>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+static IMG_GENERATION: AtomicU64 = AtomicU64::new(0);
 static PL_CACHE: Lazy<Mutex<HashMap<String, Arc<String>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+static PL_CACHE_GENERATION: AtomicU64 = AtomicU64::new(0);
 /// AES Key / 分片：拖进度条时同一 key、同一片会被反复拉，缓存住省一次往返。
 static KEY_CACHE: Lazy<Mutex<HashMap<String, (String, Arc<Vec<u8>>)>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 static SEG_CACHE: Lazy<Mutex<HashMap<String, (String, Arc<Vec<u8>>)>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+static SEG_CACHE_GENERATION: AtomicU64 = AtomicU64::new(0);
+type SegmentResult = Result<(Option<String>, Arc<Vec<u8>>), String>;
+type SegmentLoad = tokio::sync::OnceCell<SegmentResult>;
+// hls.js can issue the same segment concurrently (ABR probes, seek re-entry).
+// Share the in-progress download, but never across a proxy/security generation.
+static SEG_LOADING: Lazy<Mutex<HashMap<String, Weak<SegmentLoad>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SegmentScope {
+    request: crate::net::RequestScope,
+    cache_generation: u64,
+}
+
+fn segment_scope() -> SegmentScope {
+    SegmentScope {
+        request: crate::net::request_scope(),
+        cache_generation: SEG_CACHE_GENERATION.load(Ordering::Acquire),
+    }
+}
+
+fn segment_cache_key(scope: SegmentScope, url: &str) -> String {
+    format!(
+        "{}:{}:{}:{url}",
+        u8::from(scope.request.strict),
+        scope.request.generation,
+        scope.cache_generation
+    )
+}
+
+fn cached_segment(scope: SegmentScope, url: &str) -> Option<(String, Arc<Vec<u8>>)> {
+    let key = segment_cache_key(scope, url);
+    if let Some(hit) = KEY_CACHE.lock().unwrap().get(&key).cloned() {
+        return Some(hit);
+    }
+    SEG_CACHE.lock().unwrap().get(&key).cloned()
+}
+
+/// Discard a response that belongs to a superseded transport or cache epoch.
+/// The epoch prevents an old in-flight request from repopulating a cache that
+/// the user just cleared.
+fn store_segment_for_scope(
+    scope: SegmentScope,
+    current: SegmentScope,
+    url: &str,
+    mime: String,
+    bytes: Arc<Vec<u8>>,
+    len: usize,
+) -> bool {
+    store_segment_for_scope_with(scope, current, url, mime, bytes, len, segment_scope)
+}
+
+fn store_segment_for_scope_with<F>(
+    scope: SegmentScope,
+    current: SegmentScope,
+    url: &str,
+    mime: String,
+    bytes: Arc<Vec<u8>>,
+    len: usize,
+    current_scope: F,
+) -> bool
+where
+    F: FnOnce() -> SegmentScope,
+{
+    if scope != current {
+        return false;
+    }
+    if len > SEG_CACHE_MAX_BYTES {
+        return true;
+    }
+    let key = segment_cache_key(scope, url);
+    let (cache, max) = if len <= 65536 {
+        (&KEY_CACHE, KEY_CACHE_MAX)
+    } else {
+        (&SEG_CACHE, SEG_CACHE_MAX)
+    };
+    let mut cache = cache.lock().unwrap();
+    // clear_caches advances the epoch before clearing maps. Recheck while
+    // holding the map lock so a late writer can never insert after that clear.
+    if current_scope() != scope {
+        return false;
+    }
+    if cache.len() >= max {
+        if let Some(oldest) = cache.keys().next().cloned() {
+            cache.remove(&oldest);
+        }
+    }
+    cache.insert(key, (mime, bytes));
+    true
+}
 
 const IMG_CACHE_MAX: usize = 240;
 const PL_CACHE_MAX: usize = 60;
@@ -45,14 +144,56 @@ const KEY_CACHE_MAX: usize = 120;
 const SEG_CACHE_MAX: usize = 36;
 const SEG_CACHE_MAX_BYTES: usize = 4 * 1024 * 1024;
 
-fn cache_put<V: Clone>(map: &Mutex<HashMap<String, V>>, key: String, val: V, max: usize) {
-    let mut m = map.lock().unwrap();
-    if m.len() >= max {
-        if let Some(k) = m.keys().next().cloned() {
-            m.remove(&k);
+// Linux can selectively clear WebKit's durable cache, so proxied media must not
+// regrow it without bound. Other platforms lack that safe clearing path here;
+// keep the original WebKit disk-cache fallback for native HLS and seeks.
+#[cfg(target_os = "linux")]
+const PROXIED_MEDIA_CACHE_CONTROL: &str = "no-store";
+#[cfg(not(target_os = "linux"))]
+const PROXIED_MEDIA_CACHE_CONTROL: &str = "public, max-age=3600";
+
+#[cfg(target_os = "linux")]
+const PROXIED_IMAGE_CACHE_CONTROL: &str = "no-store";
+#[cfg(not(target_os = "linux"))]
+const PROXIED_IMAGE_CACHE_CONTROL: &str = "public, max-age=86400";
+
+/// Run one in-progress request per key. Every waiter clones the same result,
+/// including an error. Failed cells are removed immediately so a later request
+/// can retry instead of inheriting a short-lived failed flight.
+async fn coalesce<T, F, Fut>(
+    registry: &Mutex<HashMap<String, Weak<tokio::sync::OnceCell<Result<T, String>>>>>,
+    key: String,
+    fetch: F,
+) -> Result<T, String>
+where
+    T: Clone,
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<T, String>>,
+{
+    let load = {
+        let mut requests = registry.lock().unwrap();
+        requests.retain(|_, request| request.strong_count() > 0);
+        if let Some(load) = requests.get(&key).and_then(Weak::upgrade) {
+            load
+        } else {
+            let load = Arc::new(tokio::sync::OnceCell::new());
+            requests.insert(key.clone(), Arc::downgrade(&load));
+            load
+        }
+    };
+    let result = load.get_or_init(fetch).await.clone();
+    if result.is_err() {
+        if let Ok(mut requests) = registry.lock() {
+            if requests
+                .get(&key)
+                .and_then(Weak::upgrade)
+                .is_some_and(|request| Arc::ptr_eq(&request, &load))
+            {
+                requests.remove(&key);
+            }
         }
     }
-    m.insert(key, val);
+    result
 }
 
 /* ───────────────────────── AES ───────────────────────── */
@@ -107,8 +248,33 @@ fn image_kind(buf: &[u8]) -> Option<&'static str> {
     None
 }
 
-/// 取封面：命中缓存直接返回，否则下载并按需解密。
-pub async fn load_image(url: &str) -> Result<(String, Arc<Vec<u8>>), String> {
+/// 取封面：命中缓存直接返回；同地址的进行中请求共享下载和解密结果。
+pub async fn load_image(url: &str) -> ImageResult {
+    let generation = {
+        let cache = IMG_CACHE.lock().unwrap();
+        if let Some(hit) = cache.get(url).cloned() {
+            let kind = image_kind(&hit).unwrap_or("image/jpeg");
+            return Ok((kind.to_string(), hit));
+        }
+        IMG_GENERATION.load(Ordering::Acquire)
+    };
+    let loading = {
+        let mut requests = IMG_LOADING.lock().unwrap();
+        requests.retain(|_, request| request.strong_count() > 0);
+        let key = (generation, url.to_string());
+        if let Some(request) = requests.get(&key).and_then(Weak::upgrade) {
+            request
+        } else {
+            let request = Arc::new(ImageLoad::new());
+            requests.insert(key, Arc::downgrade(&request));
+            request
+        }
+    };
+    loading.get_or_init(|| download_image(url, generation)).await.clone()
+}
+
+async fn download_image(url: &str, generation: u64) -> ImageResult {
+    // 缓存检查与领取任务之间，另一请求可能已完成。
     if let Some(hit) = IMG_CACHE.lock().unwrap().get(url).cloned() {
         let kind = image_kind(&hit).unwrap_or("image/jpeg");
         return Ok((kind.to_string(), hit));
@@ -122,7 +288,16 @@ pub async fn load_image(url: &str) -> Result<(String, Arc<Vec<u8>>), String> {
     };
     let kind = image_kind(&plain).unwrap_or("image/jpeg").to_string();
     let arc = Arc::new(plain);
-    cache_put(&IMG_CACHE, url.to_string(), arc.clone(), IMG_CACHE_MAX);
+    let mut cache = IMG_CACHE.lock().unwrap();
+    // 清缓存后，旧下载可完成当前显示，但不再把结果写回新一代缓存。
+    if IMG_GENERATION.load(Ordering::Acquire) == generation {
+        if cache.len() >= IMG_CACHE_MAX {
+            if let Some(key) = cache.keys().next().cloned() {
+                cache.remove(&key);
+            }
+        }
+        cache.insert(url.to_string(), arc.clone());
+    }
     Ok((kind, arc))
 }
 
@@ -199,6 +374,7 @@ fn rewrite_uri_attr(line: &str, prefix: &str) -> String {
 pub async fn load_playlist(url: &str, prefix: &str) -> Result<Arc<String>, String> {
     // 缓存 key 要带 prefix：同一份 m3u8 在不同 scheme 下改写结果不一样
     let cache_key = format!("{prefix}|{url}");
+    let generation = PL_CACHE_GENERATION.load(Ordering::Acquire);
     if let Some(hit) = PL_CACHE.lock().unwrap().get(&cache_key).cloned() {
         return Ok(hit);
     }
@@ -208,7 +384,17 @@ pub async fn load_playlist(url: &str, prefix: &str) -> Result<Arc<String>, Strin
         return Err("响应不是 HLS 播放列表".into());
     }
     let arc = Arc::new(rewrite_playlist(url, text, prefix));
-    cache_put(&PL_CACHE, cache_key, arc.clone(), PL_CACHE_MAX);
+    let mut cache = PL_CACHE.lock().unwrap();
+    // clear_caches advances the epoch first; never let an older in-flight
+    // playlist repopulate the cache after that clear.
+    if PL_CACHE_GENERATION.load(Ordering::Acquire) == generation {
+        if cache.len() >= PL_CACHE_MAX {
+            if let Some(key) = cache.keys().next().cloned() {
+                cache.remove(&key);
+            }
+        }
+        cache.insert(cache_key, arc.clone());
+    }
     Ok(arc)
 }
 
@@ -265,11 +451,19 @@ fn absolutize_uri_in_attr(base: &str, line: &str) -> String {
 }
 
 /// 分片 / AES Key 带内存缓存：拖动进度条时避免重复拉取同一片造成卡顿。
-pub async fn load_segment(url: &str) -> Result<(Option<String>, Arc<Vec<u8>>), String> {
-    if let Some((ctype, hit)) = KEY_CACHE.lock().unwrap().get(url).cloned() {
+pub async fn load_segment(url: &str) -> SegmentResult {
+    let scope = segment_scope();
+    if let Some((ctype, hit)) = cached_segment(scope, url) {
         return Ok((Some(ctype), hit));
     }
-    if let Some((ctype, hit)) = SEG_CACHE.lock().unwrap().get(url).cloned() {
+    let key = segment_cache_key(scope, url);
+    coalesce(&SEG_LOADING, key, || download_segment(url, scope)).await
+}
+
+async fn download_segment(url: &str, scope: SegmentScope) -> SegmentResult {
+    // Another request may have populated the completed cache while this one
+    // was waiting for the single-flight lock.
+    if let Some((ctype, hit)) = cached_segment(scope, url) {
         return Ok((Some(ctype), hit));
     }
     let (ctype, bytes) = fetch_bytes(url).await?;
@@ -285,19 +479,25 @@ pub async fn load_segment(url: &str) -> Result<(Option<String>, Arc<Vec<u8>>), S
     });
     let len = bytes.len();
     let arc = Arc::new(bytes);
-    if len <= 65536 {
-        cache_put(&KEY_CACHE, url.to_string(), (mime.clone(), arc.clone()), KEY_CACHE_MAX);
-    } else if len <= SEG_CACHE_MAX_BYTES {
-        cache_put(&SEG_CACHE, url.to_string(), (mime.clone(), arc.clone()), SEG_CACHE_MAX);
-    }
+    store_segment_for_scope(
+        scope,
+        segment_scope(),
+        url,
+        mime.clone(),
+        arc.clone(),
+        len,
+    );
     Ok((Some(mime), arc))
 }
 
 /// 清空封面 / 播放列表 / Key / 分片内存缓存
 pub fn clear_caches() {
+    SEG_CACHE_GENERATION.fetch_add(1, Ordering::AcqRel);
     if let Ok(mut g) = IMG_CACHE.lock() {
+        IMG_GENERATION.fetch_add(1, Ordering::AcqRel);
         g.clear();
     }
+    PL_CACHE_GENERATION.fetch_add(1, Ordering::AcqRel);
     if let Ok(mut g) = PL_CACHE.lock() {
         g.clear();
     }
@@ -305,6 +505,9 @@ pub fn clear_caches() {
         g.clear();
     }
     if let Ok(mut g) = SEG_CACHE.lock() {
+        g.clear();
+    }
+    if let Ok(mut g) = SEG_LOADING.lock() {
         g.clear();
     }
 }
@@ -316,14 +519,79 @@ fn respond(status: u16, ctype: &str, body: Vec<u8>, cache: &str) -> Response<Vec
     Response::builder()
         .status(StatusCode::from_u16(status).unwrap_or(StatusCode::OK))
         .header("Content-Type", ctype)
-        // WKWebView 需要 Content-Length / Accept-Ranges 才肯复用已缓冲的分片
+        // 长度以最终响应字节为准；播放列表始终完整返回，媒体分片支持 Range。
         .header("Content-Length", len)
-        .header("Accept-Ranges", "bytes")
-        .header("Access-Control-Expose-Headers", "Content-Length, Content-Type, Accept-Ranges")
+        .header("Access-Control-Expose-Headers", "Content-Length, Content-Type, Accept-Ranges, Content-Range")
         .header("X-Content-Type-Options", "nosniff")
         .header("Cache-Control", cache)
         .body(body)
         .unwrap_or_else(|_| Response::new(Vec::new()))
+}
+
+/// 为原生播放器提供单段 byte range；无效/多段范围按 HTTP 语义退回完整 200。
+fn apply_byte_range(mut response: Response<Vec<u8>>, range: Option<&str>) -> Response<Vec<u8>> {
+    use tauri::http::HeaderValue;
+
+    if response.status() != StatusCode::OK {
+        return response;
+    }
+    // A native HLS loader may send a byte probe for a playlist. Returning only
+    // its first bytes hides #EXTM3U and nested URLs, so both /hls and playlists
+    // discovered through /seg must remain complete 200 responses.
+    if response.headers().get("Content-Type").and_then(|v| v.to_str().ok())
+        .is_some_and(|value| value.to_ascii_lowercase().contains("mpegurl"))
+    {
+        return response;
+    }
+    response.headers_mut().insert("Accept-Ranges", HeaderValue::from_static("bytes"));
+    let Some((first, last)) = range
+        .and_then(|v| v.trim().strip_prefix("bytes="))
+        .and_then(|v| v.split_once('-'))
+    else {
+        return response;
+    };
+    let number = |s: &str| -> Option<usize> {
+        if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
+            None
+        } else {
+            s.parse().ok()
+        }
+    };
+    let len = response.body().len();
+    let bounds = if first.is_empty() {
+        let Some(suffix) = number(last) else { return response };
+        (suffix > 0 && len > 0).then(|| (len.saturating_sub(suffix), len - 1))
+    } else {
+        let Some(start) = number(first) else { return response };
+        let end = if last.is_empty() {
+            len.saturating_sub(1)
+        } else {
+            let Some(end) = number(last) else { return response };
+            if end < start { return response; }
+            end
+        };
+        (start < len).then(|| (start, end.min(len - 1)))
+    };
+
+    let content_range = if let Some((start, end)) = bounds {
+        // 原响应已经持有完整字节；原位截取，避免再复制完整视频分片。
+        let body = response.body_mut();
+        body.truncate(end + 1);
+        if start > 0 {
+            body.drain(..start);
+        }
+        *response.status_mut() = StatusCode::PARTIAL_CONTENT;
+        format!("bytes {start}-{end}/{len}")
+    } else {
+        response.body_mut().clear();
+        *response.status_mut() = StatusCode::RANGE_NOT_SATISFIABLE;
+        response.headers_mut().insert("Cache-Control", HeaderValue::from_static("no-store"));
+        format!("bytes */{len}")
+    };
+    let length = response.body().len().to_string();
+    response.headers_mut().insert("Content-Length", HeaderValue::from_str(&length).unwrap());
+    response.headers_mut().insert("Content-Range", HeaderValue::from_str(&content_range).unwrap());
+    response
 }
 
 /// 主清单的子清单也经 /seg 返回：必须继续改写，不能把内层 URL 原样交给播放器。
@@ -342,8 +610,7 @@ fn segment_response(
                 200,
                 "application/vnd.apple.mpegurl",
                 rewrite_playlist(target, text, origin).into_bytes(),
-                // Rewriting nested URIs does not require disabling the upstream cache policy.
-                "public, max-age=3600",
+                PROXIED_MEDIA_CACHE_CONTROL,
             ),
             Err(_) => respond(
                 502,
@@ -357,7 +624,7 @@ fn segment_response(
         200,
         ctype.unwrap_or("application/octet-stream"),
         bytes,
-        "public, max-age=3600",
+        PROXIED_MEDIA_CACHE_CONTROL,
     )
 }
 
@@ -365,7 +632,7 @@ fn segment_response(
 ///
 /// `origin` 是本平台自定义协议的完整基址，见 [`LOCAL_ORIGIN`]；用于改写 m3u8 里的
 /// 分片与 key 地址。正常情况下调用方直接传 [`LOCAL_ORIGIN`]。
-pub async fn handle(path: &str, query: &str, origin: &str) -> Response<Vec<u8>> {
+pub async fn handle(path: &str, query: &str, origin: &str, range: Option<&str>) -> Response<Vec<u8>> {
     let target = query
         .split('&')
         .find_map(|kv| kv.strip_prefix("u="))
@@ -389,9 +656,12 @@ pub async fn handle(path: &str, query: &str, origin: &str) -> Response<Vec<u8>> 
     );
     let response = match path {
         "/img" => match load_image(&target).await {
-            Ok((kind, bytes)) => {
-                respond(200, &kind, bytes.as_ref().clone(), "public, max-age=86400")
-            }
+            Ok((kind, bytes)) => respond(
+                200,
+                &kind,
+                bytes.as_ref().clone(),
+                PROXIED_IMAGE_CACHE_CONTROL,
+            ),
             Err(e) => respond(502, "text/plain", e.into_bytes(), "no-store"),
         },
         "/hls" => match load_playlist(&target, origin).await {
@@ -409,16 +679,246 @@ pub async fn handle(path: &str, query: &str, origin: &str) -> Response<Vec<u8>> 
         },
         _ => respond(404, "text/plain", b"not found".to_vec(), "no-store"),
     };
+    let response = apply_byte_range(response, range);
     crate::playback_log::record(
         "proxy.end",
-        serde_json::json!({"route": route, "resource": crate::playback_log::resource_id(&target), "status": response.status().as_u16(), "bytes": response.body().len(), "elapsed_ms": started.elapsed().as_millis() as u64}),
+        serde_json::json!({"route": route, "resource": crate::playback_log::resource_id(&target), "status": response.status().as_u16(), "bytes": response.body().len(), "content_type": response.headers().get("Content-Type").and_then(|v| v.to_str().ok()), "content_range": response.headers().get("Content-Range").and_then(|v| v.to_str().ok()), "elapsed_ms": started.elapsed().as_millis() as u64}),
     );
     response
+}
+
+/// Socket tests supply bytes without contacting an upstream. They use the same
+/// playlist rewrite, MIME detection and range implementation as real requests.
+#[cfg(test)]
+pub(crate) fn fixture_response(
+    target: &str,
+    ctype: &str,
+    bytes: &[u8],
+    origin: &str,
+    range: Option<&str>,
+) -> Response<Vec<u8>> {
+    apply_byte_range(segment_response(target, Some(ctype), bytes.to_vec(), origin), range)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    #[tokio::test]
+    async fn concurrent_segment_flights_share_one_download() {
+        let registry: Mutex<HashMap<String, Weak<tokio::sync::OnceCell<Result<u64, String>>>>> =
+            Mutex::new(HashMap::new());
+        let calls = AtomicUsize::new(0);
+        let (first, second) = tokio::join!(
+            coalesce(&registry, "same-segment".into(), || async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                Ok(42)
+            }),
+            coalesce(&registry, "same-segment".into(), || async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(99)
+            })
+        );
+        assert_eq!(first, Ok(42));
+        assert_eq!(second, Ok(42));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn segment_flight_failure_reaches_every_waiter_and_allows_retry() {
+        let registry: Mutex<HashMap<String, Weak<tokio::sync::OnceCell<Result<u64, String>>>>> =
+            Mutex::new(HashMap::new());
+        let (first, second) = tokio::join!(
+            coalesce(&registry, "failed-segment".into(), || async {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                Err("upstream failed".to_string())
+            }),
+            coalesce(&registry, "failed-segment".into(), || async {
+                Ok(1)
+            })
+        );
+        assert_eq!(first, Err("upstream failed".to_string()));
+        assert_eq!(second, Err("upstream failed".to_string()));
+
+        let retry = coalesce(&registry, "failed-segment".into(), || async { Ok(7) }).await;
+        assert_eq!(retry, Ok(7));
+    }
+
+    #[test]
+    fn segment_keys_do_not_cross_security_proxy_or_cache_generations() {
+        let base = SegmentScope {
+            request: crate::net::RequestScope {
+                strict: true,
+                generation: 11,
+            },
+            cache_generation: 3,
+        };
+        let key = segment_cache_key(base, "https://cdn.example/seg.ts");
+        assert_eq!(key, segment_cache_key(base, "https://cdn.example/seg.ts"));
+        assert_ne!(
+            key,
+            segment_cache_key(
+                SegmentScope {
+                    request: crate::net::RequestScope {
+                        strict: false,
+                        ..base.request
+                    },
+                    ..base
+                },
+                "https://cdn.example/seg.ts"
+            )
+        );
+        assert_ne!(
+            key,
+            segment_cache_key(
+                SegmentScope {
+                    request: crate::net::RequestScope {
+                        generation: 12,
+                        ..base.request
+                    },
+                    ..base
+                },
+                "https://cdn.example/seg.ts"
+            )
+        );
+        assert_ne!(
+            key,
+            segment_cache_key(
+                SegmentScope {
+                    cache_generation: 4,
+                    ..base
+                },
+                "https://cdn.example/seg.ts"
+            )
+        );
+        assert_ne!(
+            key,
+            segment_cache_key(base, "https://cdn.example/other.ts")
+        );
+    }
+
+    #[test]
+    fn late_old_scope_segment_is_discarded_instead_of_polluting_new_cache() {
+        let url = "https://cdn.example/late-scope-test.ts";
+        let old = SegmentScope {
+            request: crate::net::RequestScope {
+                strict: true,
+                generation: 20,
+            },
+            cache_generation: 8,
+        };
+        let new = SegmentScope {
+            request: crate::net::RequestScope {
+                strict: true,
+                generation: 21,
+            },
+            cache_generation: 9,
+        };
+        let bytes = Arc::new(vec![0x5a; 70_000]);
+
+        assert!(!store_segment_for_scope(
+            old,
+            new,
+            url,
+            "video/mp2t".into(),
+            bytes.clone(),
+            bytes.len(),
+        ));
+        assert!(cached_segment(new, url).is_none());
+        assert!(cached_segment(old, url).is_none());
+
+        assert!(store_segment_for_scope_with(
+            old,
+            old,
+            url,
+            "video/mp2t".into(),
+            bytes.clone(),
+            bytes.len(),
+            || old,
+        ));
+        assert!(cached_segment(old, url).is_some());
+        assert!(cached_segment(new, url).is_none());
+
+        SEG_CACHE
+            .lock()
+            .unwrap()
+            .remove(&segment_cache_key(old, url));
+
+        // clear_caches can advance the epoch after the first scope check but
+        // before the map lock is acquired. The second check must still reject.
+        assert!(!store_segment_for_scope_with(
+            old,
+            old,
+            url,
+            "video/mp2t".into(),
+            bytes.clone(),
+            bytes.len(),
+            || new,
+        ));
+        assert!(cached_segment(old, url).is_none());
+        assert!(cached_segment(new, url).is_none());
+    }
+
+    #[test]
+    fn native_range_probe_returns_only_requested_segment_bytes() {
+        let body = b"0123456789abcdef";
+        for (range, start, end) in [
+            ("bytes=0-1", 0, 1),
+            ("bytes=0-7", 0, 7),
+            ("bytes=8-", 8, body.len() - 1),
+            ("bytes=-4", body.len() - 4, body.len() - 1),
+            ("bytes=0-999", 0, body.len() - 1),
+        ] {
+            let response = apply_byte_range(
+                respond(200, "video/mp2t", body.to_vec(), "no-store"),
+                Some(range),
+            );
+            assert_eq!(response.status(), 206, "{range}");
+            assert_eq!(response.body().as_slice(), &body[start..=end]);
+            assert_eq!(response.headers()["Content-Type"], "video/mp2t");
+            assert_eq!(response.headers()["Content-Length"], (end - start + 1).to_string());
+            assert_eq!(response.headers()["Content-Range"], format!("bytes {start}-{end}/{}", body.len()));
+        }
+    }
+
+    #[test]
+    fn native_range_probes_keep_playlists_complete() {
+        let body = b"#EXTM3U\n#EXTINF:4,\nsegment.ts\n";
+        for range in ["bytes=0-1", "bytes=99999-", "bytes=-4"] {
+            let response = apply_byte_range(
+                respond(200, "application/vnd.apple.mpegurl", body.to_vec(), "no-store"),
+                Some(range),
+            );
+            assert_eq!(response.status(), 200);
+            assert_eq!(response.body(), body);
+            assert_eq!(response.headers()["Content-Length"], body.len().to_string());
+            assert!(!response.headers().contains_key("Content-Range"));
+            assert!(!response.headers().contains_key("Accept-Ranges"));
+        }
+    }
+
+    #[test]
+    fn ranges_preserve_full_responses_and_reject_unsatisfiable_offsets() {
+        for range in [None, Some("bytes=0-1,4-5"), Some("bytes=bad"), Some("bytes=3-1"), Some("items=0-1")] {
+            let response = apply_byte_range(respond(200, "video/mp2t", b"data".to_vec(), "no-store"), range);
+            assert_eq!(response.status(), 200);
+            assert_eq!(response.body(), b"data");
+            assert!(!response.headers().contains_key("Content-Range"));
+        }
+        for (body, range) in [(b"data".as_slice(), "bytes=4-"), (b"data".as_slice(), "bytes=-0"), (b"".as_slice(), "bytes=0-1")] {
+            let response = apply_byte_range(respond(200, "video/mp2t", body.to_vec(), "no-store"), Some(range));
+            assert_eq!(response.status(), 416);
+            assert!(response.body().is_empty());
+            assert_eq!(response.headers()["Content-Length"], "0");
+            assert_eq!(response.headers()["Content-Range"], format!("bytes */{}", body.len()));
+        }
+        let error = apply_byte_range(respond(502, "text/plain", b"upstream failed".to_vec(), "no-store"), Some("bytes=0-1"));
+        assert_eq!(error.status(), 502);
+        assert_eq!(error.body(), b"upstream failed");
+        assert!(!error.headers().contains_key("Accept-Ranges"));
+    }
 
     #[test]
     fn dateranges_keep_timing_and_scte_metadata_but_drop_external_resources() {
@@ -462,6 +962,10 @@ mod tests {
             "application/vnd.apple.mpegurl"
         );
         assert_eq!(response.headers()["X-Content-Type-Options"], "nosniff");
+        assert_eq!(
+            response.headers()["Cache-Control"],
+            PROXIED_MEDIA_CACHE_CONTROL
+        );
         assert!(!response
             .headers()
             .contains_key("Access-Control-Allow-Origin"));
@@ -476,6 +980,44 @@ mod tests {
             LOCAL_ORIGIN,
         );
         assert!(bom.body().starts_with(b"#EXTM3U\n"));
+    }
+
+    #[test]
+    fn proxied_media_uses_platform_cache_policy() {
+        let segment = segment_response(
+            "https://cdn.example/seg-1.ts",
+            Some("video/mp2t"),
+            b"segment-bytes".to_vec(),
+            LOCAL_ORIGIN,
+        );
+        assert_eq!(
+            segment.headers()["Cache-Control"],
+            PROXIED_MEDIA_CACHE_CONTROL
+        );
+        let playlist = segment_response(
+            "https://cdn.example/list.m3u8",
+            None,
+            b"#EXTM3U\nseg-1.ts\n".to_vec(),
+            LOCAL_ORIGIN,
+        );
+        assert_eq!(
+            playlist.headers()["Cache-Control"],
+            PROXIED_MEDIA_CACHE_CONTROL
+        );
+    }
+
+    #[test]
+    fn platform_cache_policy_matches_selective_clear_support() {
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(PROXIED_MEDIA_CACHE_CONTROL, "no-store");
+            assert_eq!(PROXIED_IMAGE_CACHE_CONTROL, "no-store");
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            assert_eq!(PROXIED_MEDIA_CACHE_CONTROL, "public, max-age=3600");
+            assert_eq!(PROXIED_IMAGE_CACHE_CONTROL, "public, max-age=86400");
+        }
     }
 
     /// 联网测试：默认跳过，手动跑 `cargo test --lib -- --ignored`。
@@ -503,7 +1045,7 @@ mod tests {
             &text[..text.len().min(160)]
         );
         let q = format!("u={}", enc(&url));
-        let resp = handle("/hls", &q, LOCAL_ORIGIN).await;
+        let resp = handle("/hls", &q, LOCAL_ORIGIN, None).await;
         let body = String::from_utf8_lossy(resp.body()).to_string();
         println!("proxied status={} len={}", resp.status(), body.len());
         assert!(body.contains("#EXTM3U"));
@@ -515,7 +1057,7 @@ mod tests {
             .to_string();
         println!("seg line: {}", &seg_line[..seg_line.len().min(120)]);
         let seg_q = seg_line.split("?u=").nth(1).unwrap();
-        let seg = handle("/seg", &format!("u={seg_q}"), LOCAL_ORIGIN).await;
+        let seg = handle("/seg", &format!("u={seg_q}"), LOCAL_ORIGIN, None).await;
         println!("segment status={} len={}", seg.status(), seg.body().len());
         assert_eq!(seg.status(), 200);
         assert!(seg.body().len() > 1000);
@@ -582,12 +1124,12 @@ mod tests {
 
     /// 联网测试：默认跳过。封面地址带时效签名，不能硬编码进仓库，
     /// 需要用当次上游返回的地址显式传入：
-    /// `HGHUB_TEST_COVER_URL='https://…?auth_key=…' cargo test --lib -- --ignored`
+    /// `HGHUBX_TEST_COVER_URL='https://…?auth_key=…' cargo test --lib -- --ignored`
     #[tokio::test]
-    #[ignore = "联网测试：需要 HGHUB_TEST_COVER_URL，手动用 --ignored 运行"]
+    #[ignore = "联网测试：需要 HGHUBX_TEST_COVER_URL，手动用 --ignored 运行"]
     async fn cover_decrypt_works() {
-        let url = std::env::var("HGHUB_TEST_COVER_URL")
-            .expect("需要设置 HGHUB_TEST_COVER_URL 为当前有效的封面地址");
+        let url = crate::env::var("TEST_COVER_URL")
+            .expect("需要设置 HGHUBX_TEST_COVER_URL 为当前有效的封面地址");
         match load_image(&url).await {
             Ok((kind, bytes)) => {
                 println!("kind={kind} len={}", bytes.len());

@@ -13,6 +13,9 @@ pub struct Session {
     pub token: String,
     #[serde(default)]
     pub user: serde_json::Value,
+    /// Process-local identity epoch, so even logout/login with a reused token invalidates old work.
+    #[serde(skip)]
+    pub revision: u64,
 }
 
 #[cfg(test)]
@@ -46,6 +49,44 @@ mod tests {
             serde_json::from_str(r#"{"token":"legacy","user":{"id":1}}"#).unwrap();
         assert_eq!(store.token("https://huangguoai.com"), None);
         assert!(store.user("https://huangguoai.com").is_null());
+    }
+
+    #[test]
+    fn late_profile_and_logout_cannot_replace_a_new_session() {
+        let store = SessionStore::new();
+        let origin = "https://example.com";
+        store.set(origin, "first".into(), json!({"id": 1}));
+        let first = store.snapshot(origin).unwrap();
+        store.set(origin, "second".into(), json!({"id": 2}));
+        assert!(!store.update_user_if_current(&first, json!({"id": 1, "nickname": "late"})));
+        assert!(!store.clear_if_current(&first));
+        assert_eq!(store.user(origin)["id"], 2);
+        let second = store.snapshot(origin).unwrap();
+        assert!(!store.update_user_if_current(&second, json!({"id": 1})));
+        assert!(store.update_user_if_current(&second, json!({"id": 2, "nickname": "fresh"})));
+    }
+
+    #[test]
+    fn relogin_with_same_token_still_invalidates_old_requests() {
+        let store = SessionStore::new();
+        let origin = "https://example.com";
+        store.set(origin, "same".into(), json!({"id": 1}));
+        let old = store.snapshot(origin).unwrap();
+        store.clear();
+        store.set(origin, "same".into(), json!({"id": 1}));
+        assert!(!store.is_current(&old));
+        assert!(!store.clear_if_current(&old));
+        assert!(serde_json::to_value(store.snapshot(origin).unwrap()).unwrap().get("revision").is_none());
+    }
+
+    #[test]
+    fn late_login_cannot_replace_a_newer_account() {
+        let store = SessionStore::new();
+        let origin = "https://example.com";
+        let revision = store.revision();
+        assert!(store.set_if_revision(revision, origin, "new".into(), json!({"id": 2})));
+        assert!(!store.set_if_revision(revision, origin, "late".into(), json!({"id": 1})));
+        assert_eq!(store.user(origin)["id"], 2);
     }
 }
 
@@ -87,12 +128,71 @@ impl SessionStore {
         }
     }
 
+    pub fn snapshot(&self, origin: &str) -> Option<Session> {
+        let cur = self.current.lock().unwrap();
+        (cur.origin == origin && !cur.token.is_empty()).then(|| cur.clone())
+    }
+
+    pub fn revision(&self) -> u64 {
+        self.current.lock().unwrap().revision
+    }
+
+    pub fn set_if_revision(&self, expected_revision: u64, origin: &str, token: String, user: serde_json::Value) -> bool {
+        {
+            let mut cur = self.current.lock().unwrap();
+            if cur.revision != expected_revision { return false; }
+            cur.origin = origin.to_string();
+            cur.token = token;
+            cur.user = user;
+            cur.revision = cur.revision.wrapping_add(1);
+        }
+        self.persist();
+        true
+    }
+
+    fn same_identity(current: &Session, expected: &Session) -> bool {
+        current.revision == expected.revision
+            && current.origin == expected.origin
+            && current.token == expected.token
+            && current.user.get("id") == expected.user.get("id")
+    }
+
+    pub fn is_current(&self, expected: &Session) -> bool {
+        Self::same_identity(&self.current.lock().unwrap(), expected)
+    }
+
+    pub fn update_user_if_current(&self, expected: &Session, user: serde_json::Value) -> bool {
+        {
+            let mut cur = self.current.lock().unwrap();
+            if !Self::same_identity(&cur, expected) || user.get("id") != expected.user.get("id") {
+                return false;
+            }
+            cur.user = user;
+        }
+        self.persist();
+        true
+    }
+
+    pub fn clear_if_current(&self, expected: &Session) -> bool {
+        {
+            let mut cur = self.current.lock().unwrap();
+            if !Self::same_identity(&cur, expected) { return false; }
+            cur.token.clear();
+            cur.origin.clear();
+            cur.user = serde_json::Value::Null;
+            cur.revision = cur.revision.wrapping_add(1);
+        }
+        self.persist();
+        true
+    }
+
     pub fn set(&self, origin: &str, token: String, user: serde_json::Value) {
         {
             let mut cur = self.current.lock().unwrap();
             cur.origin = origin.to_string();
             cur.token = token;
             cur.user = user;
+            cur.revision = cur.revision.wrapping_add(1);
         }
         self.persist();
     }
@@ -103,14 +203,16 @@ impl SessionStore {
             cur.token.clear();
             cur.origin.clear();
             cur.user = serde_json::Value::Null;
+            cur.revision = cur.revision.wrapping_add(1);
         }
         self.persist();
     }
 
     fn persist(&self) {
-        let snapshot = self.current.lock().unwrap().clone();
+        // Keep state locked through the write so a slower earlier writer cannot persist over a new login.
+        let snapshot = self.current.lock().unwrap();
         if let Some(path) = self.file.lock().unwrap().as_ref() {
-            if let Ok(text) = serde_json::to_string_pretty(&snapshot) {
+            if let Ok(text) = serde_json::to_string_pretty(&*snapshot) {
                 let _ = std::fs::write(path, text);
             }
         }

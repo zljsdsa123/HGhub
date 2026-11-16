@@ -8,7 +8,7 @@
 2. 依次复现：播放首页视频、切到其他页面播放、点击进度条、拖动进度条。点击/松手后等待画面恢复；若一直卡住，至少等待 10 秒。
 3. 回到设置关闭日志，点击 **复制播放诊断日志**。关闭后已有日志保留。
 
-macOS 文件位于 `~/Library/Application Support/com.hghub.huangguo/`：
+macOS 文件位于 `~/Library/Application Support/com.hghubx.app/`：
 
 - `playback.log`：当前诊断日志，JSON Lines 格式。
 - `playback.previous.log`：轮转前的日志，若存在，手动取文件时请一并提供。

@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { tracePlayback } from "./playbackDiagnostics";
 import type {
-  CommentPage, Detail, HotWord, Paged, PlayInfo, Post, PostCategory, RankItem, TagGroup, TopicCard, TopicDetail, User, UserProfile, VideoCard,
+  AccountHistoryPage, AccountIdentity, AccountSnapshot, CommentPage, Detail, HotSearchVideo, Paged, PlayInfo, Post, PostCategory, RankItem, TagGroup, TopicCard, TopicDetail, User, UserProfile, VideoCard,
 } from "./types";
 
 /* ── 运行环境 ───────────────────────────────────────────── */
@@ -58,10 +58,10 @@ export const logLine = (msg: string) => invoke("debug_log", { msg }).catch(() =>
 const NET_FAIL = /dns|timed? ?out|timeout|connection|refused|reset|unreachable|broken pipe|tls|ssl|handshake|证书|网络|连接/i;
 /** 只读命令：链路抖动时可以安全重试一次；写操作绝不重试（避免重复提交） */
 const READ_ONLY = new Set([
-  "api_me", "api_feed", "api_category", "api_rank", "api_search",
+  "api_me", "api_feed", "api_original_videos", "api_category", "api_rank", "api_search",
   "api_posts", "api_post", "api_post_comments", "api_video", "api_play", "api_comments",
   "api_topics", "api_topic", "api_tags", "api_tag_videos", "api_search_hot",
-  "api_post_playback", "api_post_categories", "api_post_category", "api_related", "api_following", "api_user", "api_user_stats", "api_user_videos",
+  "api_post_playback", "api_post_categories", "api_post_category", "api_post_tag", "api_related", "api_following", "api_user", "api_user_stats", "api_user_videos",
 ]);
 /** 给自动选线用的观察点。api.ts 不反向依赖 autoLine，避免循环 import。 */
 export type NetObserver = (r: { ok: boolean; cmd: string; msg?: string; networkish?: boolean }) => void;
@@ -125,28 +125,42 @@ export const api = {
     }>("app_boot"),
   securitySet: (strict: boolean) => call<boolean>("security_set", { strict }),
   login: (username: string, password: string) =>
-    call<{ user: User }>("api_login", { username, password }),
+    call<AccountSnapshot>("api_login", { username, password }),
   register: (username: string, password: string, email = "") =>
-    call<{ user: User }>("api_register", { username, password, email }),
-  logout: () => call<{ ok: boolean }>("api_logout"),
-  me: () => call<User>("api_me"),
+    call<AccountSnapshot>("api_register", { username, password, email }),
+  logout: (identity?: AccountIdentity) => call<{ ok: boolean }>("api_logout", identity ? { expectedUserId: identity.expectedUserId, expectedOrigin: identity.expectedOrigin } : {}),
+  me: (identity?: AccountIdentity) => call<AccountSnapshot>("api_me", identity ? { expectedUserId: identity.expectedUserId, expectedOrigin: identity.expectedOrigin } : {}),
+  accountHistory: (identity: AccountIdentity, page = 1, size = 50) => call<AccountHistoryPage>("api_account_history", { expectedUserId: identity.expectedUserId, expectedOrigin: identity.expectedOrigin, page, size }),
+  accountHistoryRecord: (identity: AccountIdentity, videoId: number, ep: number) => call<unknown>("api_account_history_record", { expectedUserId: identity.expectedUserId, expectedOrigin: identity.expectedOrigin, videoId, ep }),
+  accountHistoryDelete: (identity: AccountIdentity, ids: number[]) => call<unknown>("api_account_history_delete", { expectedUserId: identity.expectedUserId, expectedOrigin: identity.expectedOrigin, ids }),
 
   feed: (page = 1, size = 20) => call<Paged<VideoCard>>("api_feed", { page, size }),
   topics: () => call<{ items: TopicCard[] }>("api_topics"),
-  topic: (slug: string) => call<TopicDetail>("api_topic", { slug }),
+  topic: (slug: string, page = 1, size = 20) => call<TopicDetail>("api_topic", { slug, page, size }),
   tags: () => call<{ categories: TagGroup[] }>("api_tags"),
   tagVideos: (tag: string, page = 1, size = 20) =>
     call<Paged<VideoCard>>("api_tag_videos", { tag, page, size }),
-  category: (cate: string, page = 1, size = 20) =>
-    call<Paged<VideoCard>>("api_category", { cate, page, size }),
+  postTag: (tag: string, page = 1, size = 20) =>
+    call<Paged<Post>>("api_post_tag", { tag, page, size }),
+  category: (cate: string, page = 1, size = 20, sort?: string) =>
+    call<Paged<VideoCard>>("api_category", { cate, page, size, sort: sort ?? null }),
+  originalVideos: (cate: string, page = 1, size = 20, sort?: string) =>
+    call<Paged<VideoCard>>("api_original_videos", { cate, page, size, sort: sort ?? null }),
   rank: (kind: "hot" | "recommend" | "potential") =>
     call<{ type: string; items: RankItem[] }>("api_rank", { kind }),
-  search: (q: string, page = 1, size = 20) =>
+  /** 全站搜索。`kind` 省略时后端只搜短剧；吃瓜帖要显式传 "post"（issue #34）。 */
+  search: (q: string, page = 1, size = 20, kind?: "video" | "post") =>
     call<{ items: VideoCard[]; pagination: Paged<VideoCard>["pagination"]; keyword: string }>(
-      "api_search", { q, page, size },
+      "api_search", { q, page, size, kind: kind ?? null },
     ),
-  searchHot: () => call<{ items: HotWord[] }>("api_search_hot"),
-  posts: (page = 1, size = 20) => call<Paged<Post>>("api_posts", { page, size }),
+  /** 只搜吃瓜帖：返回结构是 Post 而不是 VideoCard。 */
+  searchPosts: (q: string, page = 1, size = 20) =>
+    call<{ items: Post[]; pagination: Paged<Post>["pagination"]; keyword: string }>(
+      "api_search", { q, page, size, kind: "post" },
+    ),
+  searchHot: () => call<{ items: HotSearchVideo[] }>("api_search_hot"),
+  posts: (page = 1, size = 20, sort?: string) =>
+    call<Paged<Post>>("api_posts", { page, size, sort: sort ?? null }),
   post: (id: number) => call<Post & { content?: string; video_url?: string }>("api_post", { id }),
   /** 吃瓜帖视频：详情里 video_url 恒为空，地址由 playback 接口下发（可能多段）。 */
   postPlayback: (id: number) => call<{ mode?: number; videos?: { index: number; url: string }[] }>("api_post_playback", { id }),
@@ -159,26 +173,29 @@ export const api = {
   commentSend: (id: number, ep: number, text: string, replyId?: number) =>
     call<unknown>("api_comment_send", { id, ep, text, replyId: replyId ?? null }),
 
-  clearCache: () => invoke<void>("cache_clear"),
+  clearCache: () => invoke<{ webCache: boolean; platform: string }>("cache_clear"),
   netDiag: () => invoke<Record<string, unknown>>("net_diag"),
-  postLike: (id: number, on: boolean) => invoke<unknown>("api_post_like", { id, on }),
-  postCollect: (id: number, on: boolean) => invoke<unknown>("api_post_collect", { id, on }),
+  postLike: (id: number, on: boolean, identity?: AccountIdentity) => invoke<unknown>("api_post_like", { id, on, expectedUserId: identity?.expectedUserId, expectedOrigin: identity?.expectedOrigin }),
+  postCollect: (id: number, on: boolean, identity?: AccountIdentity) => invoke<unknown>("api_post_collect", { id, on, expectedUserId: identity?.expectedUserId, expectedOrigin: identity?.expectedOrigin }),
   postComments: (id: number, page: number, size: number) => call<CommentPage>("api_post_comments", { id, page, size }),
   postCategories: () => call<{ items: PostCategory[] }>("api_post_categories"),
-  postCategory: (route: string, page = 1, size = 20) =>
-    call<Paged<Post>>("api_post_category", { route, page, size }),
+  postCategory: (route: string, page = 1, size = 20, sort?: string) =>
+    call<Paged<Post>>("api_post_category", { route, page, size, sort: sort ?? null }),
   related: (id: number) => call<{ items: VideoCard[] }>("api_related", { id }),
   following: (page = 1, size = 20) => call<Paged<VideoCard>>("api_following", { page, size }),
   user: (id: number) => call<UserProfile>("api_user", { id }),
   userStats: (id: number) => call<{ user_id: number; like_count: number; following: number; followers: number; video_count: number; post_count: number }>("api_user_stats", { id }),
   userVideos: (id: number, page = 1, size = 20) => call<Paged<VideoCard>>("api_user_videos", { id, page, size }),
-  like: (id: number, ep: number, on: boolean) => call<unknown>("api_like", { id, ep, on }),
-  collect: (id: number, on: boolean) => call<unknown>("api_collect", { id, on }),
-  follow: (uid: number, on: boolean) => call<unknown>("api_follow", { uid, on }),
+  like: (id: number, ep: number, on: boolean, identity?: AccountIdentity) => call<unknown>("api_like", { id, ep, on, expectedUserId: identity?.expectedUserId, expectedOrigin: identity?.expectedOrigin }),
+  collect: (id: number, on: boolean, identity?: AccountIdentity) => call<unknown>("api_collect", { id, on, expectedUserId: identity?.expectedUserId, expectedOrigin: identity?.expectedOrigin }),
+  follow: (uid: number, on: boolean, identity?: AccountIdentity) => call<unknown>("api_follow", { uid, on, expectedUserId: identity?.expectedUserId, expectedOrigin: identity?.expectedOrigin }),
 
   /* 线路（数据源）：固定线路写死在 Rust 侧，镜像线路从地址发布页拉、推荐镜像从发布入口页拉 */
   lineState: () => call<LineState>("line_state"),
   lineSet: (url: string) => call<string>("line_set", { url }),
+  lineCustomSet: (url: string) => call<LineApply>("line_custom_set", { url }),
+  lineReset: () => call<LineApply>("line_reset"),
+  lineCancel: () => call<void>("line_cancel"),
   lineMirrors: () => call<LineMirrors>("line_mirrors"),
   lineProbe: (urls: string[]) => call<LineProbe[]>("line_probe", { urls }),
   lineAuto: () => call<LineAuto>("line_auto"),
@@ -186,6 +203,11 @@ export const api = {
   lineTryMain: () => call<LineTryMain>("line_try_main"),
   /* 线路体检：探一次 /api/videos，和自动选线同一判据 */
   lineHealth: () => call<LineHealth>("line_health"),
+
+  /* 应用内代理：只影响本应用的上游网络请求。 */
+  proxyState: () => call<ProxyState>("proxy_state"),
+  proxySet: (mode: ProxyMode, url: string) => call<ProxyState>("proxy_set", { mode, url }),
+  proxyTest: (mode: ProxyMode, url: string) => call<ProxyProbe>("proxy_test", { mode, url }),
 
   /* 更新检查：对比 GitHub Release 的 tag */
   checkUpdate: () => call<UpdateInfo>("check_update"),
@@ -210,12 +232,25 @@ export type UpdateInfo = {
 /* ── 线路（数据源） ─────────────────────────────────────── */
 
 export type LineItem = { name?: string; url: string; host?: string };
-export type LineState = { base: string; default: string; fixed: LineItem[] };
+export type LineState = { base: string; default: string; fixed: LineItem[]; custom?: boolean };
+export type LineApply = { base: string; custom: boolean };
 export type LineMirrors = { source: string; script?: string; items: LineItem[]; recommended_source?: string; recommended: LineItem[] };
 export type LineProbe = { url: string; ok: boolean; status?: number; ms: number; error?: string };
 export type LineHealth = { base: string; ok: boolean; ms: number; status: number | null };
 
-/** 自动选线：只比 `.com` 与 `.ai` 两条，取通的那条、快的那条。 */
+export type ProxyMode = "system" | "custom" | "off";
+export type ProxyState = {
+  mode: ProxyMode;
+  /** 保存过的自定义地址，仅用于设置表单回填，不写入日志。 */
+  url: string;
+  /** 不含认证信息的实际出口。 */
+  effective?: string | null;
+  system_proxy?: boolean;
+  env_proxy?: boolean;
+};
+export type ProxyProbe = { ok: boolean; status?: number | null; ms: number; error?: string; via?: string };
+
+/** 自动选线：主站可用时优先，否则检测可信发布页中的镜像。 */
 export type LineAutoCandidate = {
   tier: "main" | "cn" | "mirror";
   url: string;
@@ -225,12 +260,13 @@ export type LineAutoCandidate = {
   status: number | null;
 };
 export type LineAuto = {
+  cancelled?: boolean;
   previous: string;
   base: string;
   switched: boolean;
   pick: {
     base: string;
-    tier: "main" | "cn" | "none";
+    tier: "main" | "cn" | "mirror" | "none";
     ms: number;
     reason: string;
     candidates: LineAutoCandidate[];
@@ -239,6 +275,7 @@ export type LineAuto = {
 
 /** 回切主站的探测结果：`probe.ok` 为主站到底通不通 */
 export type LineTryMain = {
+  cancelled?: boolean;
   previous: string;
   base: string;
   switched: boolean;

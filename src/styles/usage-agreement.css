@@ -1,0 +1,41 @@
+/* Startup agreement owns the viewport; no application surface is mounted behind it. */
+.hg-agreement {
+  position:fixed; inset:0; z-index:10000; display:flex; align-items:center; justify-content:center;
+  padding:max(12px,env(safe-area-inset-top)) max(12px,env(safe-area-inset-right)) max(12px,env(safe-area-inset-bottom)) max(12px,env(safe-area-inset-left));
+  background:var(--p-bg,#101113); color:var(--p-on,#f2f3f5); font-family:var(--font-sans,system-ui,sans-serif);
+}
+.hg-agreement-card { display:flex; flex-direction:column; width:min(100%,680px); max-height:100%; min-height:0; overflow:hidden; border:1px solid var(--ios-edge,rgba(128,128,128,.3)); border-radius:28px; background:var(--p-s1,#1c1e22); box-shadow:0 18px 60px rgba(0,0,0,.16); }
+.hg-agreement-header { padding:24px 24px 16px; flex:none; }
+.hg-agreement-kicker { font-size:12px; color:var(--p-mut,#a9adb6); letter-spacing:.06em; }
+.hg-agreement-header h1 { margin-top:8px; font-size:clamp(21px,4.7vw,26px); font-weight:750; line-height:1.35; outline:none; }
+.hg-agreement-summary { margin-top:10px; font-size:13px; line-height:1.65; color:var(--p-mut,#a9adb6); }
+.hg-agreement-scroll { min-height:0; overflow-y:auto; overscroll-behavior:contain; padding:4px 24px 20px; scroll-padding:16px; flex:1 1 auto; }
+.hg-agreement-text section+section { margin-top:20px; }
+.hg-agreement-text h2 { font-size:15px; line-height:1.5; font-weight:700; margin-bottom:6px; }
+.hg-agreement-text p { font-size:14px; line-height:1.8; color:var(--p-mut,#a9adb6); overflow-wrap:anywhere; }
+.hg-agreement-text strong { font-weight:650; color:var(--p-on,#f2f3f5); }
+.hg-agreement-region { border:1px solid var(--ios-edge,rgba(128,128,128,.3)); background:var(--p-s2,#24272c); border-radius:16px; padding:14px; }
+.hg-agreement-footer { flex:none; padding:16px 24px 12px; border-top:1px solid var(--ios-edge,rgba(128,128,128,.3)); }
+.hg-agreement-check { display:flex; gap:10px; align-items:flex-start; min-height:44px; padding:4px 0 10px; cursor:pointer; font-size:12px; line-height:1.65; }
+.hg-agreement-check input { flex:none; width:20px; height:20px; margin-top:2px; accent-color:var(--p-primary,#60cdff); }
+.hg-agreement-actions { display:flex; flex-wrap:wrap; gap:10px; }
+.hg-agreement-actions button { min-height:48px; flex:1; border-radius:999px; padding:10px 16px; font:inherit; font-size:14px; font-weight:600; cursor:pointer; transition:opacity 120ms,background-color 120ms; }
+.hg-agreement-exit { border:1px solid var(--ios-edge,rgba(128,128,128,.3)); color:var(--p-on,#f2f3f5); background:var(--p-s2,#24272c); }
+.hg-agreement-accept { border:1px solid transparent; color:var(--p-on-primary,#101113); background:var(--p-primary,#60cdff); }
+.hg-agreement-actions button:disabled { opacity:.4; cursor:default; }
+.hg-agreement-actions button:not(:disabled):active { opacity:.75; }
+.hg-agreement :is(button,input,[tabindex="0"]):focus-visible { outline:2px solid var(--p-primary,#60cdff); outline-offset:3px; }
+.hg-agreement-footnote { margin-top:10px; text-align:center; font-size:11px; color:var(--p-mut,#a9adb6); }
+.hg-agreement-error { padding:8px 0; font-size:13px; line-height:1.6; color:var(--p-danger,#ff8585); }
+@media(max-width:380px) {
+  .hg-agreement-header { padding:18px 16px 12px; }
+  .hg-agreement-scroll { padding-inline:16px; }
+  .hg-agreement-footer { padding:12px 16px 10px; }
+  .hg-agreement-actions button { padding-inline:10px; font-size:13px; }
+}
+@media(max-height:560px) {
+  .hg-agreement-card { display:block; overflow-y:auto; overscroll-behavior:contain; }
+  .hg-agreement-scroll { overflow:visible; }
+  .hg-agreement-header { padding-top:16px; }
+}
+@media(prefers-reduced-motion:reduce) { .hg-agreement-actions button { transition:none; } }

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 照上游 Minireel/HGhub scripts/build-ios-unsigned.sh 重写（9ca6972）。
+# 照上游 Minireel/HGhubX scripts/build-ios-unsigned.sh 重写（9ca6972）。
 # 关键点：不再用 cargo 直出静态库 + -Wl,-undefined,dynamic_lookup，
 # 而是让 tauri ios build 的 options server 活着，由 Xcode 自己跑 Build Rust Code，
 # 并把 Swift 兼容库目录指到 Xcode toolchain 里（Xcode 26 挪了位置）。
@@ -11,6 +11,20 @@ LOG="$ROOT/ios-build-session.log"
 ADDR_FILE="$(node -p "require('os').tmpdir() + '/' + require('./src-tauri/tauri.conf.json').identifier + '-server-addr'")"
 mkdir -p artifacts
 rm -f "$ADDR_FILE"
+
+# init writes Tauri template icons; generate square opaque artwork and replace it
+# before either build starts. The later beforeBuildCommand repeats this idempotently.
+node scripts/generate-ios-icons.mjs
+node scripts/sync-ios-icons.mjs --required
+# 启动屏背景色与 launch.css 对齐，消除原生启动屏 -> WebView 的闪烁
+node scripts/patch-ios-splash.mjs
+# 把 UILaunchScreen 指向刚生成的 LaunchBackground 颜色（iOS 14+ 纯色启动屏）
+for plist in $(find src-tauri/gen/apple -name "Info.plist" 2>/dev/null); do
+  /usr/libexec/PlistBuddy -c "Delete :UILaunchStoryboardName" "$plist" 2>/dev/null || true
+  /usr/libexec/PlistBuddy -c "Delete :UILaunchScreen" "$plist" 2>/dev/null || true
+  /usr/libexec/PlistBuddy -c "Add :UILaunchScreen dict" "$plist"
+  /usr/libexec/PlistBuddy -c "Add :UILaunchScreen:UIColorName string LaunchBackground" "$plist"
+done
 
 # Tauri 没有 ios --no-sign。让它的 release options server 一直活着，
 # 否则 Xcode 的 Build Rust Code 阶段连不上它会直接 panic。
@@ -36,7 +50,7 @@ if [[ ! -s "$ADDR_FILE" ]]; then
   exit 1
 fi
 
-# 工程名 / scheme 动态取（我们的 productName 是 HGhub，上游是 huangguo-client）
+# 工程名 / scheme 动态取（我们的 productName 是 HGhubX）
 PROJECT="$(cd src-tauri/gen/apple && ls -d *.xcodeproj | head -1)"
 SCHEME="$(cd src-tauri/gen/apple && xcodebuild -list -project "$PROJECT" 2>/dev/null | awk '/Schemes:/{f=1;next} f&&NF{print $1;exit}')"
 if [[ -z "$PROJECT" || -z "$SCHEME" ]]; then
@@ -82,7 +96,7 @@ fi
 PACKAGE_DIR=$(mktemp -d)
 mkdir -p "$PACKAGE_DIR/Payload"
 cp -R "$APP" "$PACKAGE_DIR/Payload/"
-IPA="$ROOT/artifacts/HGhub_${VERSION}_ios.ipa"
+IPA="$ROOT/artifacts/HGhubX_${VERSION}_ios.ipa"
 (cd "$PACKAGE_DIR" && zip -qr "$IPA" Payload)
 unzip -tq "$IPA"
 ls -lh "$IPA"

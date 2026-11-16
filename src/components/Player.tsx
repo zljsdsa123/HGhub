@@ -1,11 +1,19 @@
-import React, { useEffect, useRef, useState } from "react";
+import { Button, Input } from "./ios/controls";
+import { Loader } from "./ios/effects";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import Hls from "hls.js";
-import { fmtTime, platform, playlist } from "../api";
+import { fmtTime, platform } from "../api";
+import { connectNativeMedia, playbackSource } from "../mediaTransport";
 import { mediaErrorMessage } from "../mediaErrors";
 import { mediaHost, mediaResource, observeHls, usePlayerDiagnostics } from "../playbackDiagnostics";
 import { usePlaybackActivity } from "../usePlaybackActivity";
+import { useProxyPlaybackRecovery } from "../useProxyPlaybackRecovery";
+import { createHlsRecovery, type HlsRecovery } from "../hlsRecovery";
 import { useSeekInput } from "../useSeekInput";
 import PlaybackLock from "./PlaybackLock";
+import { useInlinePlayerFullscreen } from "../useInlinePlayerFullscreen";
+import "../styles/post-player.css";
 import { ICompress, IExpand, ILockF, IPauseF, IPlayF, IVol, IVolMute } from "../icons";
 
 type Props = {
@@ -29,16 +37,17 @@ export default function Player({
   onTogglePlay, onToggleMute, controls = true, className = "", diagnosticContext = {},
 }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null);
-  const wrapRef = useRef<HTMLDivElement>(null);
+  const latestSource = useRef(src); latestSource.current = src;
   const hlsRef = useRef<Hls | null>(null);
-  const recoverCountRef = useRef(0);
+  const recoveryRef = useRef<HlsRecovery | null>(null);
   const { trace, requestSeek } = usePlayerDiagnostics(videoRef, hlsRef, { view: "post_detail", ...diagnosticContext, active, resource: mediaResource(src) });
   const activity = usePlaybackActivity(videoRef, hlsRef, { active, autoPlay: !!autoPlay, src, trace });
+  const { slotRef, wrapRef, host, full, fallback, toggleFull } = useInlinePlayerFullscreen({ active, src, videoRef, activity });
+  const proxyRecovery = useProxyPlaybackRecovery(videoRef, src, activity, trace);
   const [playing, setPlaying] = useState(false);
   const [waiting, setWaiting] = useState(false);
   const [time, setTime] = useState(0);
   const [duration, setDuration] = useState(0);
-  const [full, setFull] = useState(false);
   const [rate, setRate] = useState(1);
   const [errMsg, setErrMsg] = useState<string>("");
   const [controlsLocked, setControlsLocked] = useState(false);
@@ -63,13 +72,14 @@ export default function Player({
     if (!video || !src) return;
     setErrMsg("");
     setWaiting(false);
-    recoverCountRef.current = 0;
-    const url = playlist(src);
-    trace("source.load", { engine: Hls.isSupported() ? "hls.js" : "native", auto_play: autoPlay, resource: mediaResource(src), host: mediaHost(src) });
+    const resume = proxyRecovery.resume();
+    const source = playbackSource(src, Hls.isSupported());
+    let disconnectNative: (() => void) | undefined;
+    trace("source.load", { engine: source.engine, auto_play: autoPlay, resource: mediaResource(src), host: mediaHost(src) });
 
     if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
 
-    if (Hls.isSupported()) {
+    if (source.engine === "hls.js") {
       const hls = new Hls({
         // 禁用从插播/内容引导 JSON 派生直连 URL 的可选功能。
         interstitialsController: undefined,
@@ -80,6 +90,7 @@ export default function Player({
         // Keep the same macOS seek workaround as the shared player.
         preferManagedMediaSource: false,
         autoStartLoad: false,
+        startPosition: resume?.time ?? -1,
         lowLatencyMode: false,
         maxBufferLength: 30,
         maxMaxBufferLength: 60,
@@ -94,57 +105,50 @@ export default function Player({
         fragLoadingRetryDelay: 400,
       });
       hlsRef.current = hls;
+      const recovery = createHlsRecovery({
+        hls, video, url: source.url,
+        isCurrent: () => hlsRef.current === hls,
+        isActive: activity.isActive,
+        resumePlayback: () => activity.play("media_recovery", true),
+        onFatal: data => {
+          const detail = `${data.type}/${data.details}/${data.response?.code ?? ""}/${String(data.reason ?? "").slice(0, 80)}`;
+          (window as unknown as { __hlsErr?: string }).__hlsErr = detail;
+          setErrMsg(detail); setWaiting(false); setPlaying(false);
+          if (data.type !== Hls.ErrorTypes.NETWORK_ERROR && data.type !== Hls.ErrorTypes.MEDIA_ERROR) {
+            hls.destroy(); hlsRef.current = null;
+          }
+        },
+      });
+      recoveryRef.current = recovery;
       observeHls(hls, trace);
-      hls.loadSource(url);
+      hls.loadSource(source.url);
       hls.attachMedia(video);
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
-        if (activity.isActive()) hls.startLoad();
-        if (autoPlay) activity.play("manifest_autoplay", true);
+        if (activity.isActive()) hls.startLoad(resume?.time ?? -1);
+        if (autoPlay && !resume) activity.play("manifest_autoplay", true);
       });
       hls.on(Hls.Events.FRAG_BUFFERED, () => {
-        recoverCountRef.current = 0;
+        recovery.buffered();
         setErrMsg("");
       });
-      hls.on(Hls.Events.ERROR, (_e, data) => {
-        if (!data.fatal) {
-          if (
-            data.details === Hls.ErrorDetails.BUFFER_STALLED_ERROR ||
-            data.details === Hls.ErrorDetails.FRAG_LOAD_ERROR
-          ) {
-            try { hls.startLoad(video.currentTime || -1); } catch { /* ignore */ }
-          }
-          return;
-        }
-        if (!activity.isActive()) return;
-        if (data.type === Hls.ErrorTypes.NETWORK_ERROR && recoverCountRef.current < 4) {
-          recoverCountRef.current += 1;
-          try { hls.startLoad(video.currentTime || -1); } catch { /* ignore */ }
-          return;
-        }
-        if (data.type === Hls.ErrorTypes.MEDIA_ERROR && recoverCountRef.current < 4) {
-          recoverCountRef.current += 1;
-          try { hls.recoverMediaError(); video.play().catch(() => {}); } catch { /* ignore */ }
-          return;
-        }
-        const detail = `${data.type}/${data.details}/${data.response?.code ?? ""}/${String(data.reason ?? "").slice(0, 80)}`;
-        (window as unknown as { __hlsErr?: string }).__hlsErr = detail;
-        setErrMsg(detail);
-        if (!activity.isActive()) return;
-        if (data.type === Hls.ErrorTypes.NETWORK_ERROR) hls.startLoad();
-        else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) hls.recoverMediaError();
-        else { hls.destroy(); hlsRef.current = null; }
-      });
+      hls.on(Hls.Events.ERROR, (_e, data) => recovery.error(data));
     } else {
-      // Safari / 部分 WebView 原生支持 HLS
-      video.src = url;
-      if (autoPlay) activity.play("native_autoplay", true);
+      disconnectNative = connectNativeMedia(video, source, {
+        isCurrent: () => latestSource.current === src && videoRef.current === video,
+        onReady: () => { if (activity.isPlayWanted() && !resume) activity.play("native_autoplay", true); },
+        onError: message => { trace("source.transport_error"); setWaiting(false); setPlaying(false); setErrMsg(message); },
+      });
     }
 
     return () => {
+      disconnectNative?.();
+      recoveryRef.current?.dispose(); recoveryRef.current = null;
       trace("source.cleanup");
       if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
     };
-  }, [src, autoPlay]);
+  }, [src, autoPlay, proxyRecovery.revision]);
+
+  useLayoutEffect(() => { recoveryRef.current?.activityChanged(); }, [active]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -159,18 +163,18 @@ export default function Player({
     video.setAttribute("webkit-playsinline", "true");
   }, []);
 
-  useEffect(() => {
-    const onFs = () => setFull(!!document.fullscreenElement);
-    document.addEventListener("fullscreenchange", onFs);
-    return () => document.removeEventListener("fullscreenchange", onFs);
-  }, []);
-
   const toggle = () => {
     const video = videoRef.current;
     if (!video) return;
     trace("toggle.request");
     if (video.paused) activity.play("toggle");
     else activity.pause("toggle");
+  };
+
+  const retry = () => {
+    if (!activity.isActive()) return;
+    setErrMsg(""); setWaiting(true); setPlaying(false);
+    proxyRecovery.retry("manual", true);
   };
 
   const cycleRate = () => {
@@ -181,17 +185,12 @@ export default function Player({
     setRate(next);
   };
 
-  const toggleFull = () => {
-    const el = wrapRef.current;
-    if (!el) return;
-    if (document.fullscreenElement) document.exitFullscreen().catch(() => {});
-    else el.requestFullscreen().catch(() => {});
-  };
-
   const pct = duration > 0 ? (seek.time / duration) * 100 : 0;
 
   return (
-    <div ref={wrapRef} className={`relative bg-black overflow-hidden group ${className}`}>
+    <div ref={slotRef} className={`post-player-slot ${className}`}>
+    {createPortal(<div ref={wrapRef} className="post-player relative bg-black overflow-hidden"
+      data-playing={playing} data-fullscreen={full} data-fullscreen-fallback={fallback}>
       <div className="absolute inset-0" inert={controlsLocked}>
       <video
         ref={videoRef}
@@ -219,51 +218,54 @@ export default function Player({
       />
 
       {errMsg && (
-        <div className="absolute left-2 top-2 z-30 max-w-[80%] rounded bg-black/70 px-2 py-1 text-[10px] leading-tight text-red-300 break-all">
-          {errMsg}
+        <div role="alert" className="absolute left-2 top-2 z-30 max-w-[80%] rounded bg-black/70 px-2 py-1 text-[12px] leading-tight text-red-300 break-all">
+          <span>{errMsg}</span>
+          <Button onClick={retry} disabled={!active} className="ml-2 px-2 py-1 text-white">重试</Button>
         </div>
       )}
 
-      {waiting && (
+      {waiting && !errMsg && (
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-          <div className="w-9 h-9 spinner" />
+          <Loader className="w-9 h-9 spinner" />
         </div>
       )}
 
-      {!playing && !waiting && (
-        <button onClick={toggle} aria-label="播放"
+      {!playing && !waiting && !errMsg && (
+        <Button onClick={toggle} aria-label="播放"
           className="absolute inset-0 flex items-center justify-center">
           <span className="w-16 h-16 rounded-full bg-black/45 backdrop-blur-sm flex items-center justify-center elev-2 pressable">
             <IPlayF size={26} className="text-white ml-0.5" />
           </span>
-        </button>
+        </Button>
       )}
 
       {controls && (
-        <div className="absolute inset-x-0 bottom-0 px-3 pb-2 pt-8 bg-gradient-to-t from-black/80 to-transparent opacity-0 group-hover:opacity-100 transition-opacity">
-          <input aria-label="播放进度" type="range" {...seek.inputProps}
-            className="hg-range w-full" style={{ ...seek.inputProps.style, "--fill": `${pct}%` } as React.CSSProperties} />
-          <div className="flex items-center gap-3 mt-1 text-white">
-            <button onClick={toggle} aria-label={playing ? "暂停" : "播放"} className="pressable">
+        <div className="player-inline-controls" role="group" aria-label="播放控制">
+          <div className="post-player-seek-row">
+            <Input aria-label="播放进度" type="range" {...seek.inputProps}
+              className="hg-range" style={{ ...seek.inputProps.style, "--fill": `${pct}%` } as React.CSSProperties} />
+            <span className="post-player-time">{fmtTime(seek.time)} / {fmtTime(duration)}</span>
+          </div>
+          <div className="post-player-actions">
+            <Button onClick={toggle} aria-label={playing ? "暂停" : "播放"} className="pressable">
               {playing ? <IPauseF size={16} /> : <IPlayF size={16} />}
-            </button>
-            <button onClick={() => onToggleMute?.()} aria-label={muted ? "取消静音" : "静音"} className="pressable">
+            </Button>
+            <Button onClick={() => onToggleMute?.()} aria-label={muted ? "取消静音" : "静音"} className="pressable">
               {muted ? <IVolMute size={16} /> : <IVol size={16} />}
-            </button>
-            <span className="text-[11px] tabular-nums text-white/85">{fmtTime(seek.time)} / {fmtTime(duration)}</span>
-            <div className="flex-1" />
-            <button onClick={() => setControlsLocked(true)} aria-label="锁定播放控制" title="锁定播放控制" aria-pressed={false} className="pressable">
+            </Button>
+            <Button onClick={() => setControlsLocked(true)} aria-label="锁定播放控制" title="锁定播放控制" aria-pressed={false} className="pressable">
               <ILockF size={16} />
-            </button>
-            <button onClick={cycleRate} className="text-[11px] font-bold text-white/85 pressable tabular-nums">{rate}x</button>
-            <button onClick={toggleFull} aria-label="全屏" className="pressable">
+            </Button>
+            <Button onClick={cycleRate} aria-label={`播放速度 ${rate} 倍`} className="text-[12px] font-bold text-white/85 pressable tabular-nums">{rate}x</Button>
+            <Button onClick={toggleFull} aria-label={full ? "退出全屏" : "全屏"} aria-pressed={full} className="pressable">
               {full ? <ICompress size={16} /> : <IExpand size={16} />}
-            </button>
+            </Button>
           </div>
         </div>
       )}
       </div>
       {controlsLocked && <PlaybackLock active={active} onUnlock={() => setControlsLocked(false)} />}
+    </div>, host)}
     </div>
   );
 }

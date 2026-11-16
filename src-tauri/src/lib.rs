@@ -1,9 +1,17 @@
 mod api;
+#[cfg(any(target_os = "macos", target_os = "ios", test))]
+mod apple_proxy;
+mod cache;
+mod env;
 #[cfg(target_os = "ios")]
 mod ios_layout;
+#[cfg(any(target_os = "ios", test))]
+mod ios_media_http;
 mod lines;
 #[cfg(target_os = "linux")]
 mod linux_http;
+#[cfg(target_os = "linux")]
+mod linux_webview;
 mod logging;
 #[cfg(target_os = "macos")]
 mod macos_titlebar;
@@ -12,10 +20,26 @@ mod media_dns;
 mod net;
 mod network_policy;
 mod playback_log;
+mod proxy;
+mod search_hot;
 mod session;
 
 use api::Api;
 use tauri::Manager;
+
+/// AVFoundation loads media outside WKWebView's custom protocol handler.
+/// Start its loopback bridge only when an iOS native player requests it.
+#[tauri::command]
+async fn media_http_origin() -> Result<String, String> {
+    #[cfg(target_os = "ios")]
+    {
+        ios_media_http::origin().await
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        Err("原生媒体 HTTP 通道仅适用于 iOS".into())
+    }
+}
 
 fn allowed_dev_host(host: &str) -> bool {
     if matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]") {
@@ -51,6 +75,7 @@ fn allowed_frontend_origin(origin: &str) -> bool {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(
             tauri_plugin_opener::Builder::new()
                 .open_js_links_on_click(false)
@@ -98,6 +123,12 @@ pub fn run() {
         })
         .plugin(
             tauri::plugin::Builder::<_, ()>::new("navigation-guard")
+                .on_webview_ready(|webview| {
+                    #[cfg(target_os = "linux")]
+                    linux_webview::configure(&webview);
+                    #[cfg(not(target_os = "linux"))]
+                    let _ = webview;
+                })
                 .on_navigation(|_webview, url| {
                     let host = url.host_str().unwrap_or("");
                     (url.scheme() == "tauri" && host == "localhost")
@@ -148,11 +179,21 @@ pub fn run() {
             let uri = request.uri().clone();
             let path = uri.path().to_string();
             let query = uri.query().unwrap_or("").to_string();
+            // iOS 原生播放器会用小范围请求探测资源。只处理无条件、单头 GET Range；
+            // 尚无 ETag/Last-Modified 可校验时，If-Range 保守退回完整响应。
+            let range = if request.method() == tauri::http::Method::GET
+                && !request.headers().contains_key("If-Range")
+                && request.headers().get_all("Range").iter().count() == 1
+            {
+                request.headers().get("Range").and_then(|v| v.to_str().ok()).map(str::to_owned)
+            } else {
+                None
+            };
             // 自定义协议基址随平台不同，统一定义在 media::LOCAL_ORIGIN
             // （Windows/Android 是 http://<scheme>.localhost，macOS/iOS/Linux 是 <scheme>://localhost）。
             // 它同时是 m3u8 分片/key 改写用的前缀，必须与前端 src/api.ts 的 LOCAL 一致。
             tauri::async_runtime::spawn(async move {
-                let mut resp = media::handle(&path, &query, media::LOCAL_ORIGIN).await;
+                let mut resp = media::handle(&path, &query, media::LOCAL_ORIGIN, range.as_deref()).await;
                 if let Some(origin) =
                     request_origin.and_then(|s| tauri::http::HeaderValue::from_str(&s).ok())
                 {
@@ -170,6 +211,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             api::app_boot,
+            media_http_origin,
             playback_log::playback_log_status,
             playback_log::playback_log_set,
             playback_log::playback_log_write,
@@ -179,11 +221,17 @@ pub fn run() {
             api::net_diag,
             api::line_state,
             api::line_set,
+            api::line_custom_set,
+            api::line_reset,
+            api::line_cancel,
             api::line_mirrors,
             api::line_probe,
             api::line_auto,
             api::line_try_main,
             api::line_health,
+            api::proxy_state,
+            api::proxy_set,
+            api::proxy_test,
             api::check_update,
             api::open_url,
             api::set_orientation,
@@ -192,11 +240,16 @@ pub fn run() {
             api::api_register,
             api::api_logout,
             api::api_me,
+            api::api_account_history,
+            api::api_account_history_record,
+            api::api_account_history_delete,
             api::api_feed,
+            api::api_original_videos,
             api::api_topics,
             api::api_topic,
             api::api_tags,
             api::api_tag_videos,
+            api::api_post_tag,
             api::api_category,
             api::api_rank,
             api::api_search,

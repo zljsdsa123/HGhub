@@ -1,25 +1,25 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "HGhub",
-  "version": "1.2.17",
+  "productName": "HGhubX",
+  "version": "2.1.2",
   "identifier": "com.zltest.hghub",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm build && node scripts/sync-android-icons.mjs",
+    "beforeBuildCommand": "pnpm build && node scripts/generate-ios-icons.mjs && node scripts/sync-android-icons.mjs && node scripts/sync-ios-icons.mjs && node scripts/patch-android-splash.mjs",
     "frontendDist": "../dist"
   },
   "app": {
     "windows": [
       {
         "label": "main",
-        "title": "HGhub",
+        "title": "HGhubX",
         "width": 1200,
         "height": 780,
         "minWidth": 900,
         "minHeight": 620,
         "decorations": false,
-        "backgroundColor": "#1a1a1a",
+        "backgroundColor": "#071218",
         "transparent": false,
         "resizable": true,
         "center": true
@@ -44,7 +44,7 @@
     ],
     "android": {
       "minSdkVersion": 24,
-      "versionCode": 1002017
+      "versionCode": 2001002
     }
   }
 }
