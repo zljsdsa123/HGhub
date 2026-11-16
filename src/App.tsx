@@ -13,6 +13,7 @@ import { PostsPage, PostDetail } from "./pages/Posts";
 import { TopicsPage, TopicPage, TagsPage, TagPage } from "./pages/Discover";
 import { FollowingPage, UserPage } from "./pages/User";
 import LoginModal from "./components/LoginModal";
+import CalculatorGate from "./components/CalculatorGate";
 import { ToastHost } from "./components/ui";
 import { DesktopRail, DesktopTitleBar } from "./components/DesktopChrome";
 import ResizeHandles from "./components/ResizeHandles";
@@ -265,10 +266,31 @@ function MobileShell() {
 
 /* ============ 入口 ============ */
 export default function App() {
-  const { platform, loginOpen, setLoginOpen, tab, setTab, stack, pop, fs, setFs } = useStore();
+  const { platform, loginOpen, setLoginOpen, tab, setTab, stack, pop, fs, setFs, setClean } = useStore();
+  const [unlocked, setUnlocked] = useState(false);
   useEffect(() => {
     tracePlayback("navigation.change", { tab, stack: stack.map(p => ({ page: p.kind, key: p.key })), login_open: loginOpen });
   }, [tab, stack, loginOpen]);
+
+  /* 离开应用时暂停并卸载真实首页；每次回到前台都重新显示计算器。 */
+  useEffect(() => {
+    const lock = () => {
+      setUnlocked(false);
+      setTab("home");
+      setLoginOpen(false);
+      setFs(false);
+      setClean(false);
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "hidden") lock();
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    window.addEventListener("pagehide", lock);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      window.removeEventListener("pagehide", lock);
+    };
+  }, [setTab, setLoginOpen, setFs, setClean]);
 
   /* iOS：长按快进会触发 WKWebView 系统文本选择放大镜（loupe），纯 CSS 挡不住。
      原生层已默认关闭文本交互（isTextInteractionEnabled=false）；这里在用户触碰输入框时
@@ -300,6 +322,7 @@ export default function App() {
      不注册这个监听，Tauri 会直接 webView.goBack() 或退出，表现就是「任意页面返回都回桌面」。 */
   const backRef = useRef<() => void>(() => {});
   backRef.current = () => {
+    if (!unlocked) return;                                  // 伪装计算器状态不退出应用
     if (fs) { setFs(false); return; }                        // 沉浸全屏
     if (document.fullscreenElement) { document.exitFullscreen().catch(() => {}); return; }
     if (runBack()) return;                                  // 播放器的选集/评论/图文面板
@@ -335,6 +358,8 @@ export default function App() {
     }, 2500);
     return () => window.clearTimeout(t);
   }, []);
+
+  if (!unlocked) return <CalculatorGate onUnlock={() => setUnlocked(true)} />;
 
   return (
     <>
