@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- TV launcher banner: code-drawn paths remain sharp at any launcher scale. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="320dp"
+    android:height="180dp"
+    android:viewportWidth="320"
+    android:viewportHeight="180">
+    <path android:fillColor="#071218" android:pathData="M0,0H320V180H0Z" />
+    <path android:fillColor="#0C2934" android:pathData="M0,139C73,103 111,179 194,124S281,89 320,113V180H0Z" />
+    <path android:fillColor="#123F4F" android:pathData="M124,22H196Q206,22 206,32V104Q206,114 196,114H124Q114,114 114,104V32Q114,22 124,22Z" />
+    <group android:translateX="114" android:translateY="22" android:scaleX="1.4375" android:scaleY="1.4375">
+        <group android:translateX="-2.909091" android:translateY="-2.909091" android:scaleX="1.4545455" android:scaleY="1.4545455">
+            <path android:fillColor="#00000000" android:strokeColor="#60CDFF" android:strokeWidth="4.4" android:strokeLineCap="round" android:pathData="M14,13V35M14,24H24M24,13V35" />
+            <path android:fillColor="#00000000" android:strokeColor="#60CDFF" android:strokeWidth="4" android:strokeLineCap="round" android:pathData="M31,17.5C34.2,17.5 36.5,20.1 36.5,24S34.2,30.5 31,30.5" />
+        </group>
+        <path android:fillColor="#B1F5DC" android:pathData="M40,27.2L46.3,31.9L40,36.6Z" />
+        <path android:fillColor="#00000000" android:strokeColor="#B1F5DC" android:strokeWidth="2.9" android:strokeLineCap="round" android:pathData="M46.7,11.3L52.5,17.1M52.5,11.3L46.7,17.1" />
+    </group>
+    <!-- HGhubX TV wordmark, drawn as paths rather than device-dependent text. -->
+    <group android:translateX="64" android:translateY="134">
+        <path android:fillColor="#00000000" android:strokeColor="#ECF7FA" android:strokeWidth="2.6" android:strokeLineCap="round" android:strokeLineJoin="round"
+            android:pathData="M0,0V20M0,10H13M13,0V20M36,3C33,-1 21,-1 21,10S33,21 36,17V11H29M44,0V20M44,12C44,6 57,6 57,12V20M65,8V15C65,22 78,22 78,15V8M86,0V20M86,12C86,6 99,6 99,14S86,22 86,16M108,0L122,20M122,0L108,20" />
+        <path android:fillColor="#00000000" android:strokeColor="#B1F5DC" android:strokeWidth="2.6" android:strokeLineCap="round" android:strokeLineJoin="round"
+            android:pathData="M144,0H160M152,0V20M170,0L178,20L186,0" />
+    </group>
+</vector>

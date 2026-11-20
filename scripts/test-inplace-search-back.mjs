@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdir, writeFile } from "node:fs/promises";
+import { access, mkdir, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { createServer } from "vite";
 import { chromium } from "playwright-core";
-import { installFixture } from "./fixtures/app-ui.mjs";
+import { installFixture, unlockCalculator } from "./fixtures/app-ui.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const output = new URL("../test-results/inplace-search-back/", import.meta.url);
@@ -12,10 +12,16 @@ const report = { environment: "Real App in Chromium with Android UA and mocked T
 let vite, browser;
 
 try {
-  vite = await createServer({ root, server: { host: "127.0.0.1", port: 14280, strictPort: true } });
+  vite = await createServer({ root, server: { host: "127.0.0.1", port: 0, strictPort: false } });
   await vite.listen();
   const origin = vite.resolvedUrls.local[0];
-  browser = await chromium.launch({ headless: true, executablePath: process.env.BROWSER_EXECUTABLE || "/usr/bin/google-chrome" });
+  let executablePath = process.env.BROWSER_EXECUTABLE;
+  if (!executablePath) {
+    for (const candidate of ["/usr/bin/google-chrome", "/usr/bin/chromium", "/usr/bin/chromium-browser"]) {
+      if (await access(candidate).then(() => true, () => false)) { executablePath = candidate; break; }
+    }
+  }
+  browser = await chromium.launch({ headless: true, executablePath });
   const context = await browser.newContext({
     viewport: { width: 375, height: 812 },
     userAgent: "Mozilla/5.0 (Linux; Android 15; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
@@ -35,6 +41,7 @@ try {
   });
 
   await page.goto(origin);
+  await unlockCalculator(page);
   const nav = page.getByRole("navigation", { name: "主导航" });
   await nav.waitFor();
   await page.waitForFunction(() => window.__IOS_UI_FIXTURE__.hasHardwareBack());
@@ -69,6 +76,52 @@ try {
   assert.equal(await page.getByRole("heading", { name: "专题", exact: true }).count(), 0, "Second back leaves the topic page");
   assert.equal(await page.getByRole("heading", { name: "分类", exact: true }).isVisible(), true, "Second back returns to the category tab");
   report.checks.push("second back follows the normal page stack");
+
+  // Focus/inert contract merged from the retired test-inplace-search-focus.mjs
+  // (same component, mobile context): modal focus, inert background, shortcut
+  // containment, Tab wrap, and trigger-focus restore on close.
+  // The stack pop returned to the category tab; re-enter the topic page where
+  // the in-place search trigger lives.
+  await page.getByRole("button").filter({ has: page.getByText("专题", { exact: true }) }).click();
+  await page.getByRole("heading", { name: "专题", exact: true }).waitFor();
+  await searchButton.click();
+  const dialog = page.getByRole("dialog", { name: "短剧搜索", exact: true });
+  await dialog.waitFor();
+  await field.waitFor();
+  assert.equal(await field.evaluate(element => element === document.activeElement), true, "Search input receives initial focus");
+  assert.equal(await dialog.getAttribute("aria-modal"), "true");
+  assert.equal(await page.getByRole("heading", { name: "专题", exact: true }).evaluate(element => !!element.closest("[inert]")), true,
+    "Page content behind the in-place search is inert");
+  report.checks.push("search is a modal dialog, receives focus, and makes the covered page inert");
+
+  await dialog.getByRole("button", { name: "退出搜索", exact: true }).focus();
+  for (const key of ["/", "1", "2", "3", "4"]) {
+    await page.keyboard.press(key);
+    assert.equal(await dialog.count(), 1, `${key} must not switch tabs or discard the search page`);
+    assert.equal(await field.isVisible(), true, `${key} keeps the search field visible`);
+  }
+  await field.focus();
+  report.checks.push("shell slash and number shortcuts stay inside search without navigating away");
+
+  const activeInside = () => page.evaluate(() => {
+    const dialogElement = document.querySelector(".ios-inplace-search");
+    return !!dialogElement && !!document.activeElement && dialogElement.contains(document.activeElement);
+  });
+  for (let index = 0; index < 8; index += 1) {
+    await page.keyboard.press("Tab");
+    assert.equal(await activeInside(), true, `Tab ${index + 1} stays inside the search dialog`);
+  }
+  for (let index = 0; index < 8; index += 1) {
+    await page.keyboard.press("Shift+Tab");
+    assert.equal(await activeInside(), true, `Shift+Tab ${index + 1} stays inside the search dialog`);
+  }
+  report.checks.push("Tab and Shift+Tab wrap without reaching the inert page");
+
+  await field.fill("都市");
+  await field.press("Escape");
+  await dialog.waitFor({ state: "detached" });
+  assert.equal(await searchButton.evaluate(element => element === document.activeElement), true, "Closing search restores focus to its trigger");
+  report.checks.push("Escape closes only the search and restores focus");
   report.passed = true;
   await page.screenshot({ path: fileURLToPath(new URL("final.png", output)), animations: "disabled" });
 } catch (error) {

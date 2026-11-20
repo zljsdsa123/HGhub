@@ -1,0 +1,52 @@
+/* All dimensions use the TV root scale: 1rem = 18 logical pixels at 960 × 540. */
+.tv-detail { min-height: 100%; padding: 0.4444rem 0.4444rem 1.7778rem; }
+.tv-detail h1 { margin: 0.2222rem 0 0.6667rem; font-size: 1.5556rem; line-height: 1.3; }
+.tv-detail h2 { margin: 1.5556rem 0 0.7778rem; font-size: 1.2778rem; }
+.tv-detail-hero { display: flex; align-items: flex-start; gap: 1.5556rem; margin-top: 1.2222rem; }
+.tv-detail-cover { flex: 0 0 10.5556rem; width: 10.5556rem; height: 15rem; display: flex; align-items: center; justify-content: center; overflow: hidden; border-radius: 0.7778rem; background: #172d3d; color: #9bb7cb; }
+.tv-detail-cover img { width: 100%; height: 100%; object-fit: cover; }
+.tv-detail-cover-wide { flex-basis: 14.7222rem; width: 14.7222rem; height: 8.8889rem; }
+.tv-detail-copy { flex: 1; min-width: 0; }
+.tv-detail-meta { font-size: 0.9444rem; color: #b2c4d3; }
+.tv-detail-description { margin: 0.6667rem 0; max-width: 34.4444rem; line-height: 1.6; font-size: 1rem; color: #d4e1eb; white-space: pre-line; overflow-wrap: anywhere; }
+.tv-detail-tags { display: flex; flex-wrap: wrap; gap: 0.4444rem; margin: 0.7778rem 0; }
+.tv-detail-tags span { font-size: 0.8889rem; line-height: 1.3333rem; border-radius: 0.3333rem; padding: 0.1111rem 0.5rem; background: #182d3e; color: #c5d9e7; }
+.tv-detail-actions { display: flex; flex-wrap: wrap; gap: 0.6667rem; margin-top: 1.1111rem; }
+.tv-detail-episode-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 0.7778rem; padding: 0.2778rem; }
+/* Every slot keeps one height: short labels, wrapped long titles and the
+   extra "上次观看" line must not stretch a single cell. The label clamps to
+   two lines so no title is silently cut mid-word without an ellipsis. */
+.tv-detail-episode-grid button { height: 4.6667rem; text-align: left; overflow: hidden; display: flex; flex-direction: column; justify-content: center; }
+.tv-detail-episode-grid button > span { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.tv-detail-episode-grid small { display: block; margin-top: 0.2222rem; color: #8cdbff; font-size: 0.8889rem; }
+.tv-detail-message { padding: 1.3333rem 0; font-size: 1rem; line-height: 1.6; }
+.tv-detail-tag-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 0.6667rem; margin: 1rem 0 1.4444rem; }
+.tv-player { position: fixed; inset: 0; z-index: 80; background: #000; color: #eef7ff; font-size: 1rem; }
+.tv-player-surface { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; }
+.tv-player-controls { position: absolute; bottom: 0; left: 0; right: 0; padding: 3.3333rem max(var(--tv-inset-x, 3vw), 1.2222rem) max(var(--tv-inset-bottom, 3vh), 0.8889rem); background: linear-gradient(transparent, rgba(1, 8, 15, .96) 40%); }
+.tv-player-controls[hidden] { display: none; }
+.tv-player-heading { display: flex; align-items: baseline; gap: 1rem; margin-bottom: 1rem; }
+.tv-player-heading h1 { font-size: 1.3333rem; line-height: 1.3; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 68%; }
+.tv-player-heading > span { color: #d0dfeb; font-size: 0.9444rem; }
+.tv-player-control-row { display: flex; align-items: center; gap: 0.8889rem; }
+.tv-player-control-row > button { flex-shrink: 0; min-width: 4.3333rem; min-height: 2.5556rem; }
+.tv-player-progress-row { margin-bottom: 0.7778rem; }
+.tv-player-progress-row > .tv-player-progress { width: 100%; min-width: 7.7778rem; display: flex; flex-direction: column; align-items: stretch; justify-content: center; gap: 0.5rem; padding: 0.5556rem 0.7778rem; }
+.tv-player-progress-track { height: 0.2778rem; overflow: hidden; background: #5c6c78; border-radius: 0.4444rem; transition: height 140ms ease, background-color 140ms ease; }
+.tv-player-progress-track > span { display: block; height: 100%; background: #7bd6ff; border-radius: inherit; transition: background-color 140ms ease; }
+.tv-player-progress[data-seeking="true"] { background: #1c3f58; border-color: var(--tv-accent); box-shadow: 0 0 1.2rem rgba(96, 205, 255, .28); }
+.tv-player-progress[data-seeking="true"] .tv-player-progress-track { height: 0.5rem; background: rgba(255, 255, 255, .28); }
+.tv-player-progress[data-seeking="true"] .tv-player-progress-track > span { background: #fff; }
+.tv-player-progress[data-seeking="true"] .tv-player-progress-time { color: #fff; font-weight: 700; }
+.tv-player-progress-time { text-align: right; font-size: 0.8889rem; font-variant-numeric: tabular-nums; }
+.tv-player-seek-hint { color: #a3e6ff; font-size: 1.0556rem; }
+.tv-player-loading { position: absolute; top: 44%; left: 50%; transform: translate(-50%, -50%); padding: 0.6667rem 1.2222rem; background: rgba(9, 24, 36, .9); border-radius: 0.5556rem; font-size: 1.1111rem; }
+.tv-player-message { position: absolute; top: 16%; left: max(var(--tv-inset-x, 3vw), 1.5556rem); right: max(var(--tv-inset-x, 3vw), 1.5556rem); max-width: 37.7778rem; margin: auto; padding: 1.3333rem; background: #102233; border: 0.0556rem solid #344b60; border-radius: 0.7778rem; }
+.tv-player-message h1, .tv-player-message h2 { margin-top: 0; font-size: 1.4444rem; }
+.tv-player-message p { font-size: 1rem; line-height: 1.5; overflow-wrap: anywhere; }
+.tv-player-message button + button { margin-left: 0.8889rem; }
+.tv-player-parts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.7778rem; padding: 0.2778rem; }
+.tv-player-parts button { height: 3.1111rem; overflow: hidden; overflow-wrap: anywhere; }
+.tv-player-options-row { display: flex; flex-wrap: wrap; gap: 0.7778rem; margin: 0.7778rem 0 1.3333rem; }
+.tv-player [aria-pressed="true"], .tv-detail [aria-pressed="true"] { background: #234b67; border-color: #7ed8ff; }
+@media (prefers-reduced-motion: reduce) { .tv-player-surface { transition: none !important; } }

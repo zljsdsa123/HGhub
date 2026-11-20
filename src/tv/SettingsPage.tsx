@@ -1,0 +1,42 @@
+import { useEffect, useRef, useState } from "react";
+import { api, APP_VERSION, hostOf, type LineState, type LineItem, type ProxyState } from "../shared/api/api";
+import { autoLineEnabled, setAutoLine, pickLine } from "../shared/network/autoLine";
+import { useContentPreferences } from "../shared/model/contentPreferences";
+import { UsageAgreementText } from "../shared/ui/UsageAgreement";
+import { setTvDisplay, useTvDisplay } from "./display";
+import { lockTvSession, useTvPin } from "./pinLock";
+import { setPlaybackPreferences, usePlaybackPreferences } from "./preferences";
+import { TvPinSettingsModal, type TvPinModalMode } from "./TvPinGate";
+import { TvModal } from "./ui";
+const groups=["播放偏好","画面边距","启动密码","标签屏蔽","线路","网络","缓存","关于"];
+export default function SettingsPage(){
+  const [group,setGroup]=useState(groups[0]),[message,setMessage]=useState(""),[busy,setBusy]=useState(false),[agreement,setAgreement]=useState(false),[pinModal,setPinModal]=useState<TvPinModalMode|null>(null);
+  const [lines,setLines]=useState<LineState|null>(null),[proxy,setProxy]=useState<ProxyState|null>(null),[auto,setAuto]=useState(autoLineEnabled);
+  const [mirrors,setMirrors]=useState<LineItem[]>([]),[mirrorError,setMirrorError]=useState("");
+  const operation = useRef(false);
+  const preferences=useContentPreferences(),display=useTvDisplay(),playback=usePlaybackPreferences(),pin=useTvPin();
+  useEffect(()=>{
+    let current=true, generation=0;
+    const refresh=()=>{const token=++generation;setAuto(autoLineEnabled());void Promise.all([api.lineState(),api.proxyState()]).then(([l,p])=>{if(current&&token===generation){setLines(l);setProxy(p);}}).catch(e=>{if(current&&token===generation)setMessage(String(e));});};
+    refresh();
+    const events=["hg:line-changed","hg:proxy-changed","hg:auto-line-changed"];
+    events.forEach(name=>window.addEventListener(name,refresh));
+    return()=>{current=false;events.forEach(name=>window.removeEventListener(name,refresh));};
+  },[]);
+  const readMirrors=async()=>{setMirrorError("");try{const result=await api.lineMirrors();setMirrors(result.items);}catch(e){setMirrorError(String(e));}};
+  useEffect(()=>{if(group==="线路")void readMirrors();},[group]);
+  const run=async(action:()=>Promise<unknown>,success="已保存")=>{if(operation.current)return;operation.current=true;setBusy(true);setMessage("");try{await action();setMessage(success);}catch(e){setMessage(String(e));}finally{operation.current=false;setBusy(false);}};
+  const availableLines=[...new Map([...(lines?.fixed||[]),...mirrors].map(line=>[line.url,line])).values()];
+  return <><header className="tv-page-heading"><h1>设置</h1></header><div className="tv-settings">
+    <div className="tv-settings-groups" data-tv-region="settings-groups" data-tv-columns="1">{groups.map(name=><button data-tv-focus={`settings-${name}`} aria-pressed={group===name} key={name} onClick={()=>{setGroup(name);setMessage("");}}>{name}</button>)}</div>
+    <section className="tv-settings-options"><h2>{group}</h2><p role="status">{busy?"正在应用…":message||preferences.storageError}</p>
+      {group==="播放偏好"&&<><h3>默认倍速</h3><div className="tv-options" data-tv-region="default-rate">{[0.75,1,1.25,1.5,2].map(rate=><button role="radio" aria-checked={playback.rate===rate} data-tv-focus={`rate-${rate}`} key={rate} onClick={()=>{try{setPlaybackPreferences({rate});}catch(e){setMessage(String(e));}}}>{rate}×</button>)}</div><h3>默认清晰度</h3><div className="tv-options" data-tv-region="default-quality">{(["main","hevc"] as const).map(quality=><button key={quality} role="radio" aria-checked={playback.quality===quality} data-tv-focus={`quality-${quality}`} onClick={()=>{try{setPlaybackPreferences({quality});}catch(e){setMessage(String(e));}}}>{quality==="main"?"标准":"高清 HEVC（如有）"}</button>)}</div><button role="switch" aria-checked={playback.autoplayNext} data-tv-focus="autoplay-next" onClick={()=>{try{setPlaybackPreferences({autoplayNext:!playback.autoplayNext});}catch(e){setMessage(String(e));}}}>作品内自动续集：{playback.autoplayNext?"开启":"关闭"}</button></>}
+      {group==="画面边距"&&<><p>背景和视频始终铺满屏幕。边距只作用于文字与控件。</p>{([['horizontal','左右'],['top','顶部'],['bottom','底部']] as const).map(([key,label])=><div className="tv-setting-row" data-tv-region={`margin-${key}`} key={key}><span>{label} {display[key]}%</span><button data-tv-focus={`margin-${key}-minus`} disabled={display[key]<=0} aria-label={`减少${label}边距`} onClick={()=>{if(!setTvDisplay({...display,[key]:display[key]-1}))setMessage("边距已生效，保存失败，请重试");}}>−</button><button data-tv-focus={`margin-${key}-plus`} disabled={display[key]>=12} aria-label={`增加${label}边距`} onClick={()=>{if(!setTvDisplay({...display,[key]:display[key]+1}))setMessage("边距已生效，保存失败，请重试");}}>＋</button></div>)}<button data-tv-focus="margin-reset" onClick={()=>{if(!setTvDisplay({horizontal:3,top:3,bottom:3}))setMessage("边距已生效，保存失败，请重试");}}>恢复 3% 边距</button></>}
+      {group==="启动密码"&&<><p>开启后，每次打开软件都需输入 4 位数字 PIN 码后才能进入。</p><div data-tv-region="pin-options" data-tv-columns="1"><button role="switch" aria-checked={pin.enabled} data-tv-focus="pin-toggle" onClick={()=>{setMessage("");setPinModal(pin.enabled?"disable":"setup");}}>启动密码锁：{pin.enabled?"开启":"关闭"}</button>{pin.enabled&&<button data-tv-focus="pin-change" onClick={()=>{setMessage("");setPinModal("change");}}>修改 4 位密码</button>}{pin.enabled&&<button data-tv-focus="pin-lock-now" onClick={()=>lockTvSession()}>立即锁定软件</button>}</div></>}
+      {group==="标签屏蔽"&&<><div data-tv-region="tag-switches" data-tv-columns="1"><button role="switch" aria-checked={preferences.preferences.paused} data-tv-focus="block-paused" onClick={()=>preferences.setPaused(!preferences.preferences.paused)}>暂停屏蔽：{preferences.preferences.paused?"开启":"关闭"}</button><button role="switch" aria-checked={preferences.preferences.hideUntagged} data-tv-focus="hide-untagged" onClick={()=>preferences.setHideUntagged(!preferences.preferences.hideUntagged)}>隐藏无标签内容：{preferences.preferences.hideUntagged?"开启":"关闭"}</button></div><p>在作品详情的“更多”中选择标签屏蔽。选择下方标签可以解除。</p><div className="tv-tags" data-tv-region="blocked-tags" data-tv-columns="3">{preferences.preferences.blockedTags.map(tag=><button key={tag} data-tv-focus={`blocked-${tag}`} onClick={()=>preferences.unblockTag(tag)}>解除：{tag}</button>)}</div></>}
+      {group==="线路"&&<><p>当前：{lines?hostOf(lines.base):"正在读取"}</p><div data-tv-region="line-options" data-tv-columns="1"><button disabled={busy} role="switch" aria-checked={auto} data-tv-focus="auto-line" onClick={()=>void run(async()=>{await setAutoLine(!auto);setAuto(!auto);})}>自动选线：{auto?"开启":"关闭"}</button><button data-tv-focus="pick-line" disabled={busy||!auto} onClick={()=>void run(async()=>{await pickLine("tv-settings",true);setLines(await api.lineState());})}>重新检测可用线路</button>{mirrorError&&<p role="status">{mirrorError}</p>}<button data-tv-focus="refresh-mirrors" disabled={busy} onClick={()=>void run(readMirrors,"镜像线路已更新")}>刷新镜像线路</button>{availableLines.map(line=><button key={line.url} data-tv-focus={`line-${line.url}`} role="radio" aria-checked={lines?.base===line.url} disabled={busy} onClick={()=>void run(async()=>{await setAutoLine(false);setAuto(false);await api.lineSet(line.url);window.dispatchEvent(new Event("hg:line-changed"));setLines(await api.lineState());})}>{line.name||hostOf(line.url)}</button>)}</div></>}
+      {group==="网络"&&<><p>使用电视系统代理，或直接连接。网络设置影响当前应用。</p><div data-tv-region="proxy-options" data-tv-columns="1">{(["system","off"] as const).map(mode=><button key={mode} disabled={busy} role="radio" aria-checked={proxy?.mode===mode} data-tv-focus={`proxy-${mode}`} onClick={()=>void run(async()=>{setProxy(await api.proxySet(mode,""));window.dispatchEvent(new Event("hg:proxy-changed"));})}>{mode==="system"?"跟随系统代理":"直连"}</button>)}</div></>}
+      {group==="缓存"&&<><p>清理图片与媒体缓存，保留本地片库、迁移记录及偏好。搜索目录可在搜索页单独刷新。</p><button data-tv-focus="clear-cache" disabled={busy} onClick={()=>void run(api.clearCache,"缓存已清理，片库和偏好已保留")}>清理缓存</button></>}
+      {group==="关于"&&<><h3>HGhubX TV {APP_VERSION}</h3><button data-tv-focus="read-agreement" onClick={()=>setAgreement(true)}>查看使用协议</button></>}
+    </section></div>{agreement&&<TvModal id="about-agreement" title="使用协议" onClose={()=>setAgreement(false)}><div data-tv-focus="about-agreement-text" data-tv-scroll tabIndex={0} className="tv-agreement-review"><UsageAgreementText/></div></TvModal>}{pinModal&&<TvPinSettingsModal mode={pinModal} onClose={()=>setPinModal(null)} onDone={msg=>{setPinModal(null);setMessage(msg);}}/>}</>;
+}

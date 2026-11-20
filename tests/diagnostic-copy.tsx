@@ -1,8 +1,8 @@
 import { createRoot } from "react-dom/client";
-import { AppProvider } from "../src/store";
-import Settings from "../src/pages/Settings";
-import { ToastHost } from "../src/components/ui";
-import { copyText } from "../src/clipboard";
+import { AppProvider } from "../src/shared/model/store";
+import Settings from "../src/features/settings/Settings";
+import { ToastHost } from "../src/shared/ui/ui";
+import { copyText } from "../src/shared/lib/clipboard";
 import "../src/index.css";
 
 Object.assign(window, { copyFixtureText: copyText });

@@ -128,7 +128,7 @@ async fn fetch_html() -> Result<String, String> {
         }
 
         let mut html = Vec::with_capacity(response.content_length().unwrap_or(0) as usize);
-        while let Some(chunk) = response.chunk().await.map_err(|error| error.to_string())? {
+        while let Some(chunk) = response.chunk().await.map_err(|error| crate::net::err_text(&error))? {
             if html.len().saturating_add(chunk.len()) > MAX_HTML_BYTES {
                 return Err("官网搜索页超过 2 MiB 限制".into());
             }

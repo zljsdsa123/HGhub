@@ -29,5 +29,5 @@ Thumbs.db
 # API
 docs/API.md
 
-# Agent instructions (local)
-AGENTS.md
+# Agent instructions: AGENTS.md is tracked. Keep machine-local variants out.
+AGENTS.local.md

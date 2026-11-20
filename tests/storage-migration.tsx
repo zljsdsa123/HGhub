@@ -1,6 +1,6 @@
 import React, { useEffect } from "react";
 import { createRoot } from "react-dom/client";
-import { AppProvider, useStore } from "../src/store";
+import { AppProvider, useStore } from "../src/shared/model/store";
 
 function Probe() {
   const store = useStore();
@@ -11,7 +11,7 @@ function Probe() {
     likes: store.likes, favs: store.favs, history: store.history, follows: store.follows,
     searchHist: store.searchHist, volume: store.volume, muted: store.muted,
     muteOnStartup: store.muteOnStartup, swipeEp: store.swipeEp,
-    preferHevc: store.preferHevc, theme: store.theme,
+    preferHevc: store.preferHevc, fsIdleSecs: store.fsIdleSecs, theme: store.theme,
   })}</pre>;
 }
 

@@ -138,3 +138,98 @@ pub(crate) fn apply(webview: &tauri::Webview, nudge_frame: bool) {
         let _ = crate::logging::append_debug(&error_dir, &format!("[ios-layout] capture failed: {error}"));
     }
 }
+
+pub(crate) fn request_orientation(landscape: bool) {
+    use std::ffi::c_char;
+    extern "C" {
+        fn objc_getClass(name: *const c_char) -> *mut c_void;
+        fn sel_registerName(name: *const c_char) -> *mut c_void;
+        fn objc_msgSend();
+    }
+    unsafe {
+        let msg0: unsafe extern "C" fn(*mut c_void, *mut c_void) -> *mut c_void =
+            std::mem::transmute(objc_msgSend as *const ());
+        let msg0_usize: unsafe extern "C" fn(*mut c_void, *mut c_void) -> usize =
+            std::mem::transmute(objc_msgSend as *const ());
+        let msg1_usize: unsafe extern "C" fn(*mut c_void, *mut c_void, usize) -> *mut c_void =
+            std::mem::transmute(objc_msgSend as *const ());
+        let msg2_ptr: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void, *mut c_void) =
+            std::mem::transmute(objc_msgSend as *const ());
+        let msg1_void: unsafe extern "C" fn(*mut c_void, *mut c_void) =
+            std::mem::transmute(objc_msgSend as *const ());
+
+        // iOS 16+ UIWindowScene.requestGeometryUpdateWithPreferences:errorHandler:
+        // UIInterfaceOrientationMaskPortrait = 1 << 1 = 2
+        // UIInterfaceOrientationMaskLandscapeRight = 1 << 3 = 8
+        let mask: usize = if landscape { 8 } else { 2 };
+        let prefs_cls = objc_getClass(b"UIWindowSceneGeometryPreferencesIOS\0".as_ptr() as *const c_char);
+        let app_cls = objc_getClass(b"UIApplication\0".as_ptr() as *const c_char);
+        if !prefs_cls.is_null() && !app_cls.is_null() {
+            let sel_alloc = sel_registerName(b"alloc\0".as_ptr() as *const c_char);
+            let sel_init = sel_registerName(b"initWithInterfaceOrientations:\0".as_ptr() as *const c_char);
+            let raw_prefs = msg0(prefs_cls, sel_alloc);
+            let prefs = if !raw_prefs.is_null() {
+                msg1_usize(raw_prefs, sel_init, mask)
+            } else {
+                std::ptr::null_mut()
+            };
+
+            let sel_shared = sel_registerName(b"sharedApplication\0".as_ptr() as *const c_char);
+            let app = msg0(app_cls, sel_shared);
+            if !app.is_null() && !prefs.is_null() {
+                let sel_scenes = sel_registerName(b"connectedScenes\0".as_ptr() as *const c_char);
+                let scenes_set = msg0(app, sel_scenes);
+                if !scenes_set.is_null() {
+                    let sel_all = sel_registerName(b"allObjects\0".as_ptr() as *const c_char);
+                    let arr = msg0(scenes_set, sel_all);
+                    if !arr.is_null() {
+                        let sel_count = sel_registerName(b"count\0".as_ptr() as *const c_char);
+                        let sel_at = sel_registerName(b"objectAtIndex:\0".as_ptr() as *const c_char);
+                        let sel_req = sel_registerName(
+                            b"requestGeometryUpdateWithPreferences:errorHandler:\0".as_ptr() as *const c_char,
+                        );
+                        let sel_responds = sel_registerName(b"respondsToSelector:\0".as_ptr() as *const c_char);
+                        let msg_responds: unsafe extern "C" fn(*mut c_void, *mut c_void, *mut c_void) -> bool =
+                            std::mem::transmute(objc_msgSend as *const ());
+                        let count = msg0_usize(arr, sel_count);
+                        for i in 0..count {
+                            let scene = msg1_usize(arr, sel_at, i);
+                            if !scene.is_null() && msg_responds(scene, sel_responds, sel_req) {
+                                msg2_ptr(scene, sel_req, prefs, std::ptr::null_mut());
+                            }
+                        }
+                    }
+                }
+            }
+            if !prefs.is_null() {
+                let sel_release = sel_registerName(b"release\0".as_ptr() as *const c_char);
+                msg1_void(prefs, sel_release);
+            }
+        }
+
+        // Fallback: UIDevice setValue:forKey:@"orientation" + attemptRotationToDeviceOrientation
+        let dev_cls = objc_getClass(b"UIDevice\0".as_ptr() as *const c_char);
+        let num_cls = objc_getClass(b"NSNumber\0".as_ptr() as *const c_char);
+        let str_cls = objc_getClass(b"NSString\0".as_ptr() as *const c_char);
+        let vc_cls = objc_getClass(b"UIViewController\0".as_ptr() as *const c_char);
+        if !dev_cls.is_null() && !num_cls.is_null() && !str_cls.is_null() {
+            let sel_cur = sel_registerName(b"currentDevice\0".as_ptr() as *const c_char);
+            let dev = msg0(dev_cls, sel_cur);
+            let sel_num = sel_registerName(b"numberWithInteger:\0".as_ptr() as *const c_char);
+            let orient_val: usize = if landscape { 3 } else { 1 };
+            let num = msg1_usize(num_cls, sel_num, orient_val);
+            let sel_str = sel_registerName(b"stringWithUTF8String:\0".as_ptr() as *const c_char);
+            let msg_str: unsafe extern "C" fn(*mut c_void, *mut c_void, *const c_char) -> *mut c_void =
+                std::mem::transmute(objc_msgSend as *const ());
+            let key = msg_str(str_cls, sel_str, b"orientation\0".as_ptr() as *const c_char);
+            if !dev.is_null() && !num.is_null() && !key.is_null() {
+                let sel_set_val = sel_registerName(b"setValue:forKey:\0".as_ptr() as *const c_char);
+                msg2_ptr(dev, sel_set_val, num, key);
+            }
+            if !vc_cls.is_null() {
+                let sel_attempt = sel_registerName(b"attemptRotationToDeviceOrientation\0".as_ptr() as *const c_char);
+                msg1_void(vc_cls, sel_attempt);
+            }
+        }
+    }
+}

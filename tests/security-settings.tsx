@@ -1,9 +1,9 @@
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
-import { api } from "../src/api";
-import { AppProvider, useStore } from "../src/store";
-import { ArticlePanel } from "../src/components/Panels";
-import { isStrictSecurity, setStrictSecurity } from "../src/html";
+import { api } from "../src/shared/api/api";
+import { AppProvider, useStore } from "../src/shared/model/store";
+import { ArticlePanel } from "../src/features/feed/Panels";
+import { isStrictSecurity, setStrictSecurity } from "../src/shared/lib/html";
 
 (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 let store: ReturnType<typeof useStore>;

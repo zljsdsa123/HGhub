@@ -1,8 +1,8 @@
 import React, { useState } from "react";
 import { createRoot } from "react-dom/client";
-import Home from "../src/pages/Home";
-import Category from "../src/pages/Category";
-import { AppProvider } from "../src/store";
+import Home from "../src/features/feed/Home";
+import Category from "../src/features/category/Category";
+import { AppProvider } from "../src/shared/model/store";
 import "../src/index.css";
 
 type Request = { cmd: string; args: Record<string, unknown>; resolve: (value: unknown) => void; reject: (error: string) => void };

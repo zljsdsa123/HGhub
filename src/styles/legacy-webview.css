@@ -1,0 +1,51 @@
+/* Layout fallbacks that need geometry or runtime theme values, not just a
+   syntax transform. Modern engines keep their existing materials and sizing. */
+*, *::before, *::after { box-sizing:border-box; }
+body { margin:0; }
+
+@supports not (width:min(100%,680px)) {
+  :root { --ios-page-inset:18px; }
+  .hg-launch-mark { width:132px; height:132px; }
+  .hg-launch-wordmark { font-size:32px; }
+  .hg-launch-footnote { bottom:36px; }
+  .hg-agreement-header h1 { font-size:24px; }
+  .ios-mobile-nav .hg-glass { width:100%; max-width:440px; }
+  .ios-row-card { width:150px; }
+  .video-details-sheet { height:72vh; max-height:680px; }
+  .content-tag-menu { max-height:55vh; }
+  .content-tag-menu[data-expanded=true] { max-height:70vh; }
+  .mobile-hold-guide-heading, .mobile-hold-guide[data-compact=true] .mobile-hold-guide-heading { top:calc(var(--native-sat,0px) + 16px); }
+  .mobile-hold-guide-footer, .mobile-hold-guide[data-compact=true] .mobile-hold-guide-footer { bottom:calc(var(--native-sab,0px) + 18px + var(--hold-guide-bottom,0px)); }
+  .mobile-hold-guide .mobile-hold-guide-done.ios-button { width:100%; max-width:280px; }
+  .video-details-scroll { padding-bottom:calc(var(--native-sab,0px) + 24px); }
+}
+@supports not (height:100dvh) {
+  .video-details-sheet { height:72vh; max-height:680px; }
+  .content-tag-menu { max-height:55vh; }
+  .content-tag-menu[data-expanded=true] { max-height:70vh; }
+}
+@supports not (aspect-ratio:1) {
+  .hg-launch-mark { width:132px; height:132px; }
+  .ios-poster-art { height:0; padding-top:133.333333%; }
+  .video-details-cover { height:102px; }
+  @media(max-height:440px) { .hg-launch-mark { width:92px; height:92px; } }
+}
+@supports not (color:color-mix(in srgb,red,blue)) {
+  body { background:var(--p-canvas); }
+  .ios-page { background:var(--p-bg); }
+  .ios-rank-row { background:var(--p-s1); }
+  .ios-settings-frame::after { background:var(--p-tint); }
+}
+@supports not (translate:0) {
+  .-translate-x-1\/2 { transform:translateX(-50%); }
+  .-translate-y-1\/2 { transform:translateY(-50%); }
+  .-translate-x-1\/2.-translate-y-1\/2 { transform:translate(-50%,-50%); }
+  .rotate-180 { transform:rotate(180deg); }
+  .scale-110 { transform:scale(1.1); }
+}
+/* flex gap is absent before Chromium 84; a measured feature flag also covers
+   vendor engines whose UA does not match their layout capabilities. */
+html[data-legacy-flex-gap] .hg-agreement-check input { margin-right:10px; }
+html[data-legacy-flex-gap] .hg-agreement-actions button + button { margin-left:10px; }
+html[data-legacy-flex-gap] .content-tags > *,
+html[data-legacy-flex-gap] .content-tag-options > * { margin-right:8px; margin-bottom:8px; }

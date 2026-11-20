@@ -1,0 +1,8 @@
+{
+  "_comment": "Code lines, not raw lines. Lower a budget in the PR that moves a concern out; never raise one in a feature PR. A pure file-to-directory split may record one measured baseline only when the delta is module/import scaffolding, and must keep its previous value in metadata.",
+  "src/features/feed/Feed.tsx": 680,
+  "src-tauri/src/net": 1320,
+  "src-tauri/src/api": 920,
+  "src-tauri/src/media": 1045,
+  "src-tauri/src/lines": 560
+}

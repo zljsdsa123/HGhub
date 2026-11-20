@@ -35,6 +35,15 @@
 .content-preference-tag-list .ios-button { flex:none; width:44px; height:44px; border-radius:14px; display:grid; place-items:center; color:var(--p-mut); }
 .content-preference-help { padding-top:12px; border-top:1px solid var(--ios-edge); }
 .content-preference-confirm-copy { overflow-wrap:anywhere; }
+@keyframes content-preference-drawer-in { from { opacity:0; transform:translateX(32px); } to { opacity:1; transform:none; } }
+@media(max-height:560px),(orientation:landscape) and (max-height:680px) {
+  .ios-overlay-sheet.content-preference-overlay { align-items:stretch; padding:0; }
+  .content-preference-overlay .ios-dialog { width:min(380px,58vw); max-width:none; height:100%; max-height:none; margin:0 0 0 auto; padding-bottom:0; border-radius:28px 0 0 28px; }
+  .content-preference-overlay .ios-sheet-grip { display:none; }
+  .content-preference-overlay.ios-overlay-sheet.is-open .ios-dialog { animation:content-preference-drawer-in .24s cubic-bezier(.2,.8,.2,1) both; }
+  .content-preference-overlay .content-tag-menu,.content-preference-overlay .content-tag-menu[data-expanded=true] { height:100%; max-height:none; }
+  .content-preference-overlay .content-tag-menu-header { padding-top:max(14px,var(--native-sat,0px)); }
+}
 @media (max-height:440px) {
   .content-tag-menu-header { padding-block:4px; }
   .content-tag-menu-header p { display:none; }

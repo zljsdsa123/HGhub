@@ -1,62 +1,713 @@
-name: CI
+name: CI/CD
 
+# 统一工作流：日常 PR/push 跑全量校验（前端 + Rust + Smoke + 播放/TV 诊断），
+# 打 v* tag 或手动选择 mode=package 时按平台出包并发布 GitHub Release，每次触发仅产生一条工作流记录。
 on:
   pull_request:
   push:
     branches: [main]
+    tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "运行模式：ci 跑全量校验；playback 只跑播放/TV 诊断；package 打安装包（配合 tag 发版）"
+        type: choice
+        default: ci
+        options: [ci, playback, package]
+      platforms:
+        description: "打包范围（仅 mode=package 生效）：all 全平台（含 TV），或指定单一平台"
+        type: choice
+        default: all
+        options: [all, android-arm64, android, android-tv, linux, windows, macos, ios]
+      quick:
+        description: "快速编译（仅 mode=package 生效）：thin LTO + 4 个 codegen 单元，快一倍"
+        type: boolean
+        default: true
+      tag:
+        description: "发版 tag（仅 mode=package 生效，如 v2.2.0）：配合 platforms=all 且 quick=false 发布 Release；留空只出产物"
+        type: string
+        default: ""
+      prerelease:
+        description: "标记为 Pre-release（预发布，不出正式版）"
+        type: boolean
+        default: false
+      scenarios:
+        description: "播放诊断场景（mode=ci/playback 生效）：all 或逗号分隔子集"
+        type: string
+        default: all
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: cicd-${{ github.ref }}-${{ github.event_name }}-${{ (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') && github.run_id || 'branch' }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/v') && (github.event_name != 'workflow_dispatch' || inputs.tag == '') }}
+
+env:
+  CI: "true"
 
 jobs:
+  # ================= 日常 CI 与播放/TV 诊断 =================
   frontend:
     name: Frontend build
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    if: >-
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/v')) ||
+      (github.event_name == 'workflow_dispatch' && inputs.mode == 'ci')
     steps:
       - uses: actions/checkout@v7
-
       - uses: pnpm/action-setup@v6
         with:
           version: 10
-
       - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
-
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-
-      - name: Build frontend
-        run: pnpm build
+      - name: Version fields
+        run: node scripts/check-version-sync.mjs
+      - name: Documentation links
+        run: node scripts/check-doc-links.mjs
+      - name: Build frontend (standard & TV)
+        run: |
+          VITE_APP_EDITION=tv pnpm build
+          pnpm build
+      - name: Size budgets
+        run: node scripts/check-size-budgets.mjs
 
   rust:
-    name: Rust compile check
+    name: Rust check and test
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    if: >-
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/v')) ||
+      (github.event_name == 'workflow_dispatch' && inputs.mode == 'ci')
     steps:
       - uses: actions/checkout@v7
-
+      - name: Cache Linux WebKitGTK .deb packages
+        id: apt-cache
+        uses: actions/cache@v6
+        with:
+          path: ~/apt-webkit-debs
+          key: apt-webkit-ubuntu24-v1
       - name: Install system dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
-            librsvg2-dev patchelf build-essential curl wget file libssl-dev libxdo-dev
-
+          install_from_mirror() {
+            mkdir -p ~/apt-webkit-debs
+            sudo rm -rf /var/lib/apt/lists/*
+            sudo find /etc/apt/sources.list.d -maxdepth 1 -type f ! -name 'ubuntu.sources' -delete
+            printf 'https://mirrors.edge.kernel.org/ubuntu/\nhttp://archive.ubuntu.com/ubuntu/\n' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+            if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+              sudo sed -i -E 's|^URIs:.*|URIs: https://mirrors.edge.kernel.org/ubuntu/|g' /etc/apt/sources.list.d/ubuntu.sources
+            fi
+            if [ -f /etc/apt/sources.list ]; then
+              sudo sed -i -E 's|https?://[^/[:space:]]+/ubuntu/?|https://mirrors.edge.kernel.org/ubuntu/|g' /etc/apt/sources.list
+            fi
+            sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 update
+            sudo apt-get -o Dir::Cache::archives="$HOME/apt-webkit-debs" -o Acquire::Retries=3 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 \
+              install -y --no-install-recommends \
+              libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+              librsvg2-dev patchelf build-essential curl wget file libssl-dev libxdo-dev
+            sudo rm -rf ~/apt-webkit-debs/lock ~/apt-webkit-debs/partial 2>/dev/null || true
+            sudo chown -R "$USER:$USER" ~/apt-webkit-debs
+          }
+          if [ "${{ steps.apt-cache.outputs.cache-hit }}" = "true" ] && compgen -G "$HOME/apt-webkit-debs/*.deb" >/dev/null; then
+            echo "Installing WebKitGTK dependencies from cached .deb packages..."
+            if ! (sudo dpkg --unpack ~/apt-webkit-debs/*.deb && sudo dpkg --configure -a); then
+              sudo apt-get -f install -y || true
+              rm -rf ~/apt-webkit-debs/*
+              install_from_mirror
+            fi
+          else
+            install_from_mirror
+          fi
       - uses: dtolnay/rust-toolchain@stable
-
       - uses: swatinem/rust-cache@v2.9.3
         with:
           workspaces: src-tauri -> target
           key: ci-rust
-
       - name: Cargo check
         working-directory: src-tauri
         run: cargo check --all-targets
+      - name: Cargo test
+        working-directory: src-tauri
+        run: cargo test --lib
+
+  smoke:
+    name: Browser smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    if: >-
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/v')) ||
+      (github.event_name == 'workflow_dispatch' && inputs.mode == 'ci')
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Resolve pre-installed Chrome (or fallback to Playwright Chromium)
+        run: |
+          if [ -x /usr/bin/google-chrome ]; then
+            BROWSER="/usr/bin/google-chrome"
+          else
+            pnpm exec playwright-core install --with-deps chromium
+            BROWSER="$(node --input-type=module -e "import { chromium } from 'playwright-core'; console.log(chromium.executablePath())")"
+          fi
+          echo "Using browser: $BROWSER"
+          echo "BROWSER_EXECUTABLE=$BROWSER" >> "$GITHUB_ENV"
+      - name: Run smoke fixtures
+        run: pnpm test:smoke
+
+  playback:
+    name: Playback (${{ matrix.shard }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    if: >-
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/v')) ||
+      (github.event_name == 'workflow_dispatch' && (inputs.mode == 'ci' || inputs.mode == 'playback'))
+    strategy:
+      fail-fast: false
+      matrix: >-
+        ${{
+          (inputs.scenarios == '' || inputs.scenarios == 'all') &&
+          fromJSON('{"include":[{"shard":"core","scenarios":"seek,legacy,lifecycle,gesture,proxy,portrait-fit,post-flicker"},{"shard":"extended","scenarios":"ios-native,recovery,review,tv"}]}') ||
+          fromJSON(format('{{"include":[{{"shard":"custom","scenarios":{0}}}]}}', toJSON(inputs.scenarios)))
+        }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Resolve pre-installed FFmpeg & Chrome
+        run: |
+          if ! command -v ffmpeg >/dev/null 2>&1; then
+            sudo find /etc/apt/sources.list.d -maxdepth 1 -type f ! -name 'ubuntu.sources' -delete
+            if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+              sudo sed -i -E 's|^URIs:.*|URIs: https://mirrors.edge.kernel.org/ubuntu/|g' /etc/apt/sources.list.d/ubuntu.sources
+            fi
+            sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+          fi
+          if [ -x /usr/bin/google-chrome ]; then
+            BROWSER="/usr/bin/google-chrome"
+          else
+            pnpm exec playwright-core install --with-deps chromium
+            BROWSER="$(node --input-type=module -e "import { chromium } from 'playwright-core'; console.log(chromium.executablePath())")"
+          fi
+          echo "Using browser: $BROWSER, ffmpeg: $(command -v ffmpeg)"
+          echo "BROWSER_EXECUTABLE=$BROWSER" >> "$GITHUB_ENV"
+      - name: Run playback checks and collect diagnostics
+        env:
+          PLAYBACK_SCENARIOS: ${{ matrix.scenarios }}
+        run: pnpm test:playback --browser-executable "$BROWSER_EXECUTABLE" --scenarios "$PLAYBACK_SCENARIOS" --output test-results/playback-ci
+      - name: Upload diagnostics even when a check fails
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playback-diagnostics-${{ matrix.shard }}
+          path: test-results/
+          retention-days: 7
+          if-no-files-found: warn
+
+  # ================= 平台构建与发布（仅 tag 或 mode=package 触发） =================
+  windows:
+    name: Windows (setup + portable)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') ||
+      (github.event_name == 'workflow_dispatch' && inputs.mode == 'package' &&
+       (inputs.platforms == 'all' || inputs.platforms == 'windows'))
+    env:
+      CARGO_PROFILE_RELEASE_LTO: ${{ inputs.quick && 'thin' || 'true' }}
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: ${{ inputs.quick && '4' || '1' }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: 版本号对齐 tag
+        id: ver
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            V="${GITHUB_REF_NAME#v}"
+          elif [[ -n "$INPUT_TAG" ]]; then
+            V="${INPUT_TAG#v}"
+          else
+            V="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          fi
+          node scripts/set-version.mjs "$V"
+          CODE="$(node -p "require('./src-tauri/tauri.conf.json').bundle.android.versionCode")"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "versionCode=$CODE" >> "$GITHUB_OUTPUT"
+          echo "versionName=$V  versionCode=$CODE"
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2.9.3
+        continue-on-error: true
+        timeout-minutes: 8
+        with:
+          workspaces: src-tauri -> target
+      - run: pnpm install --frozen-lockfile
+      - name: 构建（NSIS 安装包）
+        run: pnpm tauri build --bundles nsis
+      - name: 收集产物（安装包 + 便携包）
+        shell: pwsh
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          New-Item -ItemType Directory -Force artifacts | Out-Null
+          Copy-Item "src-tauri/target/release/bundle/nsis/*.exe" artifacts/
+          $bin = "src-tauri/target/release/hghubx.exe"
+          if (-not (Test-Path $bin)) {
+            $bin = (Get-ChildItem "src-tauri/target/release" -Filter *.exe | Select-Object -First 1).FullName
+          }
+          Copy-Item $bin "artifacts/HGhubX.exe"
+          Compress-Archive -Path "artifacts/HGhubX.exe" -DestinationPath "artifacts/HGhubX_${v}_x64_portable.zip" -Force
+          Remove-Item "artifacts/HGhubX.exe"
+          Get-ChildItem artifacts | Select-Object Name, Length
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows
+          path: artifacts/*
+          if-no-files-found: error
+
+  android:
+    name: Android ${{ matrix.edition == 'tv' && 'TV' || 'standard' }} (split per ABI)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') ||
+      (github.event_name == 'workflow_dispatch' && inputs.mode == 'package' &&
+       (inputs.platforms == 'all' || inputs.platforms == 'android' || inputs.platforms == 'android-arm64' || inputs.platforms == 'android-tv'))
+    strategy:
+      fail-fast: false
+      matrix:
+        edition: >-
+          ${{
+            (github.event_name == 'workflow_dispatch' && inputs.platforms == 'android-tv') && fromJSON('["tv"]') ||
+            (github.event_name == 'workflow_dispatch' && (inputs.platforms == 'android' || inputs.platforms == 'android-arm64')) && fromJSON('["standard"]') ||
+            fromJSON('["standard", "tv"]')
+          }}
+    env:
+      CARGO_PROFILE_RELEASE_LTO: ${{ inputs.quick && 'thin' || 'true' }}
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: ${{ inputs.quick && '4' || '1' }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: 版本号对齐 tag
+        id: ver
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            V="${GITHUB_REF_NAME#v}"
+          elif [[ -n "$INPUT_TAG" ]]; then
+            V="${INPUT_TAG#v}"
+          else
+            V="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          fi
+          node scripts/set-version.mjs "$V"
+          CODE="$(node -p "require('./src-tauri/tauri.conf.json').bundle.android.versionCode")"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "versionCode=$CODE" >> "$GITHUB_OUTPUT"
+          echo "versionName=$V  versionCode=$CODE"
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: 准备 Android SDK / NDK
+        run: |
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          SDKM="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKM" --licenses > /dev/null 2>&1 || true
+          "$SDKM" --install "platform-tools" "platforms;android-36" "build-tools;36.0.0" "ndk;28.2.13676358"
+          echo "NDK_HOME=$SDK/ndk/28.2.13676358" >> "$GITHUB_ENV"
+          ls "$SDK/ndk"
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android
+      - uses: swatinem/rust-cache@v2.9.3
+        continue-on-error: true
+        timeout-minutes: 8
+        with:
+          workspaces: src-tauri -> target
+          key: android-${{ matrix.edition }}
+      - run: pnpm install --frozen-lockfile
+      - name: 选择 Android TV 配置
+        if: matrix.edition == 'tv'
+        run: cp src-tauri/tauri.tv.conf.json src-tauri/tauri.android.conf.json
+      - name: 生成 Android 工程
+        run: pnpm tauri android init --ci
+      - name: 编译 APK（按 ABI 分包）
+        run: |
+          if [ "${{ inputs.platforms }}" = "android-arm64" ]; then
+            TARGETS="aarch64"
+          elif [ "${{ inputs.quick }}" = "true" ]; then
+            TARGETS="aarch64 armv7"
+          else
+            TARGETS="aarch64 armv7 x86_64"
+          fi
+          echo "targets: $TARGETS"
+          pnpm tauri android build --apk --split-per-abi --target $TARGETS
+      - name: 签名 APK
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEY_BASE64 }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ -z "${KEYSTORE_BASE64:-}" ]; then
+            echo "::error::缺少 ANDROID_KEY_BASE64 secret，无法签名"; exit 1
+          fi
+          if [ "${{ matrix.edition }}" = "tv" ]; then PREFIX="HGhubX-TV"; else PREFIX="HGhubX"; fi
+          KS="$RUNNER_TEMP/release.keystore"
+          echo "$KEYSTORE_BASE64" | base64 -d > "$KS"
+          BT="$(ls "$ANDROID_SDK_ROOT/build-tools" | sort -V | tail -1)"
+          APKSIGNER="$ANDROID_SDK_ROOT/build-tools/$BT/apksigner"
+          mkdir -p artifacts
+          found=0
+          for f in $(find src-tauri/gen/android/app/build/outputs/apk -name '*-release*.apk'); do
+            abi="$(basename "$(dirname "$(dirname "$f")")")"
+            out="artifacts/${PREFIX}_${VERSION}_${abi}.apk"
+            "$APKSIGNER" sign \
+              --ks "$KS" --ks-key-alias "$KEY_ALIAS" \
+              --ks-pass "pass:$STORE_PASSWORD" --key-pass "pass:$KEY_PASSWORD" \
+              --v4-signing-enabled false \
+              --out "$out" "$f"
+            "$APKSIGNER" verify --print-certs "$out" | head -3
+            found=$((found+1))
+          done
+          rm -f "$KS"
+          if [ "$found" -eq 0 ]; then echo "::error::没有找到 release APK"; exit 1; fi
+          AAPT2="$(ls "$ANDROID_SDK_ROOT"/build-tools/*/aapt2 | sort -V | tail -1)"
+          for a in artifacts/*.apk; do "$AAPT2" dump badging "$a" | grep -m1 "^package:"; done
+          ls -lh artifacts
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.edition == 'tv' && 'android-tv' || 'android' }}
+          path: artifacts/*
+          if-no-files-found: error
+
+  macos:
+    name: macOS (universal dmg)
+    runs-on: macos-latest
+    timeout-minutes: 60
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') ||
+      (github.event_name == 'workflow_dispatch' && inputs.mode == 'package' &&
+       (inputs.platforms == 'all' || inputs.platforms == 'macos'))
+    env:
+      CARGO_PROFILE_RELEASE_LTO: ${{ inputs.quick && 'thin' || 'true' }}
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: ${{ inputs.quick && '4' || '1' }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: 版本号对齐 tag
+        id: ver
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            V="${GITHUB_REF_NAME#v}"
+          elif [[ -n "$INPUT_TAG" ]]; then
+            V="${INPUT_TAG#v}"
+          else
+            V="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          fi
+          node scripts/set-version.mjs "$V"
+          CODE="$(node -p "require('./src-tauri/tauri.conf.json').bundle.android.versionCode")"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "versionCode=$CODE" >> "$GITHUB_OUTPUT"
+          echo "versionName=$V  versionCode=$CODE"
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: swatinem/rust-cache@v2.9.3
+        continue-on-error: true
+        timeout-minutes: 8
+        with:
+          workspaces: src-tauri -> target
+          key: macos
+      - run: pnpm install --frozen-lockfile
+      - name: 构建（Universal dmg）
+        run: |
+          if [ "${{ inputs.quick }}" = "true" ]; then
+            pnpm tauri build --target aarch64-apple-darwin
+          else
+            pnpm tauri build --target universal-apple-darwin
+          fi
+      - name: 收集产物
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          DIR=universal-apple-darwin
+          SUFFIX=universal
+          if [ "${{ inputs.quick }}" = "true" ]; then DIR=aarch64-apple-darwin; SUFFIX=arm64; fi
+          cp "src-tauri/target/$DIR/release/bundle/dmg/"*.dmg \
+             "artifacts/HGhubX_${{ steps.ver.outputs.version }}_${SUFFIX}.dmg"
+          ls -lh artifacts
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos
+          path: artifacts/*
+          if-no-files-found: error
+
+  ios:
+    name: iOS (unsigned ipa)
+    runs-on: macos-latest
+    timeout-minutes: 60
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') ||
+      (github.event_name == 'workflow_dispatch' && inputs.mode == 'package' &&
+       (inputs.platforms == 'all' || inputs.platforms == 'ios'))
+    env:
+      CARGO_PROFILE_RELEASE_LTO: ${{ inputs.quick && 'thin' || 'true' }}
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: ${{ inputs.quick && '4' || '1' }}
+      APPLE_DEVELOPMENT_TEAM: "ABCDE12345"
+    steps:
+      - uses: actions/checkout@v7
+      - name: 版本号对齐 tag
+        id: ver
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            V="${GITHUB_REF_NAME#v}"
+          elif [[ -n "$INPUT_TAG" ]]; then
+            V="${INPUT_TAG#v}"
+          else
+            V="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          fi
+          node scripts/set-version.mjs "$V"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "versionName=$V"
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+      - uses: swatinem/rust-cache@v2.9.3
+        continue-on-error: true
+        timeout-minutes: 8
+        with:
+          workspaces: src-tauri -> target
+          key: ios
+      - run: pnpm install --frozen-lockfile
+      - name: 生成 iOS 工程（带横竖屏 + ATS）
+        run: |
+          pnpm tauri ios init --ci
+          for plist in $(find src-tauri/gen/apple -name "Info.plist" 2>/dev/null); do
+            for key in "UISupportedInterfaceOrientations" "UISupportedInterfaceOrientations~iphone" "UISupportedInterfaceOrientations~ipad"; do
+              /usr/libexec/PlistBuddy -c "Delete :${key}" "$plist" 2>/dev/null || true
+              /usr/libexec/PlistBuddy -c "Add :${key} array" "$plist"
+              /usr/libexec/PlistBuddy -c "Add :${key}:0 string UIInterfaceOrientationPortrait" "$plist"
+              /usr/libexec/PlistBuddy -c "Add :${key}:1 string UIInterfaceOrientationLandscapeLeft" "$plist"
+              /usr/libexec/PlistBuddy -c "Add :${key}:2 string UIInterfaceOrientationLandscapeRight" "$plist"
+            done
+            /usr/libexec/PlistBuddy -c "Delete :NSAppTransportSecurity" "$plist" 2>/dev/null || true
+            /usr/libexec/PlistBuddy -c "Add :NSAppTransportSecurity dict" "$plist"
+            /usr/libexec/PlistBuddy -c "Add :NSAppTransportSecurity:NSAllowsArbitraryLoads bool true" "$plist"
+          done
+      - name: 构建并打包 ipa
+        shell: bash
+        env:
+          APP_VERSION: ${{ steps.ver.outputs.version }}
+        run: bash scripts/build-ios-unsigned.sh "$APP_VERSION"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ios
+          path: artifacts/*
+          if-no-files-found: error
+
+  linux:
+    name: Linux (deb)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') ||
+      (github.event_name == 'workflow_dispatch' && inputs.mode == 'package' &&
+       (inputs.platforms == 'all' || inputs.platforms == 'linux'))
+    env:
+      CARGO_PROFILE_RELEASE_LTO: ${{ inputs.quick && 'thin' || 'true' }}
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: ${{ inputs.quick && '4' || '1' }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: 版本号对齐 tag
+        id: ver
+        shell: bash
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            V="${GITHUB_REF_NAME#v}"
+          elif [[ -n "$INPUT_TAG" ]]; then
+            V="${INPUT_TAG#v}"
+          else
+            V="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          fi
+          node scripts/set-version.mjs "$V"
+          CODE="$(node -p "require('./src-tauri/tauri.conf.json').bundle.android.versionCode")"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "versionCode=$CODE" >> "$GITHUB_OUTPUT"
+          echo "versionName=$V  versionCode=$CODE"
+      - name: 缓存 Linux WebKitGTK .deb 依赖
+        id: apt-cache
+        uses: actions/cache@v6
+        with:
+          path: ~/apt-webkit-debs
+          key: apt-webkit-ubuntu22-v1
+      - name: 安装系统依赖
+        run: |
+          install_from_mirror() {
+            mkdir -p ~/apt-webkit-debs
+            sudo rm -rf /var/lib/apt/lists/*
+            sudo find /etc/apt/sources.list.d -maxdepth 1 -type f ! -name 'ubuntu.sources' -delete
+            printf 'https://mirrors.edge.kernel.org/ubuntu/\nhttp://archive.ubuntu.com/ubuntu/\n' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+            if [ -f /etc/apt/sources.list ]; then
+              sudo sed -i -E 's|https?://[^/[:space:]]+/ubuntu/?|https://mirrors.edge.kernel.org/ubuntu/|g' /etc/apt/sources.list
+            fi
+            sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 update
+            sudo apt-get -o Dir::Cache::archives="$HOME/apt-webkit-debs" -o Acquire::Retries=3 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 \
+              install -y --no-install-recommends \
+              libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+              librsvg2-dev patchelf build-essential curl wget file libssl-dev libxdo-dev
+            sudo rm -rf ~/apt-webkit-debs/lock ~/apt-webkit-debs/partial 2>/dev/null || true
+            sudo chown -R "$USER:$USER" ~/apt-webkit-debs
+          }
+          if [ "${{ steps.apt-cache.outputs.cache-hit }}" = "true" ] && compgen -G "$HOME/apt-webkit-debs/*.deb" >/dev/null; then
+            if ! (sudo dpkg --unpack ~/apt-webkit-debs/*.deb && sudo dpkg --configure -a); then
+              sudo apt-get -f install -y || true
+              rm -rf ~/apt-webkit-debs/*
+              install_from_mirror
+            fi
+          else
+            install_from_mirror
+          fi
+      - uses: pnpm/action-setup@v6
+        with:
+          version: 10
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2.9.3
+        continue-on-error: true
+        timeout-minutes: 8
+        with:
+          workspaces: src-tauri -> target
+          key: linux
+      - run: pnpm install --frozen-lockfile
+      - name: 构建（deb）
+        run: pnpm tauri build
+      - name: 收集产物
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          cp src-tauri/target/release/bundle/deb/*.deb "artifacts/HGhubX_${{ steps.ver.outputs.version }}_amd64.deb"
+          ls -lh artifacts
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux
+          path: artifacts/*
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub Release
+    needs: [windows, android, macos, linux, ios]
+    # iOS 失败时不能把整包卡住，但成功时要等它的 ipa 一起发；其余平台必须全部成功且工作流未被取消
+    if: >-
+      always() &&
+      !cancelled() &&
+      needs.windows.result == 'success' &&
+      needs.android.result == 'success' &&
+      needs.macos.result == 'success' &&
+      needs.linux.result == 'success' &&
+      (needs.ios.result == 'success' || needs.ios.result == 'failure') &&
+      (startsWith(github.ref, 'refs/tags/v') ||
+       (github.event_name == 'workflow_dispatch' && inputs.mode == 'package' && inputs.tag != '' && inputs.platforms == 'all' && !inputs.quick))
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+      - uses: actions/download-artifact@v8
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: 列出待发布文件
+        run: ls -lh artifacts
+      - name: 取版本说明
+        id: notes
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          TAG="${INPUT_TAG:-$GITHUB_REF_NAME}"
+          F="docs/release-notes/${TAG}.md"
+          if [ -f "$F" ]; then
+            echo "body_path=$F" >> "$GITHUB_OUTPUT"
+            echo "使用 $F"
+          else
+            echo "body_path=" >> "$GITHUB_OUTPUT"
+            echo "没有 $F，回退自动生成的说明"
+          fi
+      - uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ inputs.tag != '' && inputs.tag || github.ref_name }}
+          name: ${{ inputs.tag != '' && inputs.tag || github.ref_name }}
+          body_path: ${{ steps.notes.outputs.body_path }}
+          files: artifacts/*
+          generate_release_notes: ${{ steps.notes.outputs.body_path == '' }}
+          prerelease: ${{ inputs.prerelease || contains(inputs.tag != '' && inputs.tag || github.ref_name, '-') }}
+          fail_on_unmatched_files: true

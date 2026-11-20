@@ -1,5 +1,4 @@
 mod api;
-#[cfg(any(target_os = "macos", target_os = "ios", test))]
 mod apple_proxy;
 mod cache;
 mod env;
@@ -18,11 +17,14 @@ mod macos_titlebar;
 mod media;
 mod media_dns;
 mod net;
+mod net_diag;
 mod network_policy;
 mod playback_log;
 mod proxy;
+mod publish_parser;
 mod search_hot;
 mod session;
+mod updater;
 
 use api::Api;
 use tauri::Manager;
@@ -134,10 +136,8 @@ pub fn run() {
                     (url.scheme() == "tauri" && host == "localhost")
                         // Android 上自定义协议表现为 http://<scheme>.localhost，WebView 有时把它
                         // 当成一次导航进来。这是进程内的媒体代理地址，不出网，严格模式也不该拦。
-                        || (matches!(url.scheme(), "http" | "https") && host.ends_with(".localhost"))
+                        || (matches!(url.scheme(), "http" | "https") && network_policy::is_internal_webview_host(host))
                         || allowed_frontend_origin(&url.origin().ascii_serialization())
-                        || (!network_policy::strict_security()
-                            && matches!(url.scheme(), "http" | "https"))
                 })
                 .build(),
         )
@@ -166,7 +166,7 @@ pub fn run() {
                 None | Some("") | Some("null") => true,
                 Some(origin) => allowed_frontend_origin(origin),
             };
-            if network_policy::strict_security() && !origin_ok {
+            if !origin_ok {
                 playback_log::record("security.origin_denied", serde_json::json!({"origin_null": request_origin.as_deref() == Some("null")}));
                 responder.respond(
                     tauri::http::Response::builder()
@@ -191,7 +191,7 @@ pub fn run() {
             };
             // 自定义协议基址随平台不同，统一定义在 media::LOCAL_ORIGIN
             // （Windows/Android 是 http://<scheme>.localhost，macOS/iOS/Linux 是 <scheme>://localhost）。
-            // 它同时是 m3u8 分片/key 改写用的前缀，必须与前端 src/api.ts 的 LOCAL 一致。
+            // 它同时是 m3u8 分片/key 改写用的前缀，必须与前端 src/shared/api/api.ts 的 LOCAL 一致。
             tauri::async_runtime::spawn(async move {
                 let mut resp = media::handle(&path, &query, media::LOCAL_ORIGIN, range.as_deref()).await;
                 if let Some(origin) =
@@ -210,71 +210,71 @@ pub fn run() {
             });
         })
         .invoke_handler(tauri::generate_handler![
-            api::app_boot,
+            api::platform::app_boot,
             media_http_origin,
             playback_log::playback_log_status,
             playback_log::playback_log_set,
             playback_log::playback_log_write,
             playback_log::playback_log_read,
-            api::security_set,
-            api::debug_log,
-            api::net_diag,
-            api::line_state,
-            api::line_set,
-            api::line_custom_set,
-            api::line_reset,
-            api::line_cancel,
-            api::line_mirrors,
-            api::line_probe,
-            api::line_auto,
-            api::line_try_main,
-            api::line_health,
-            api::proxy_state,
-            api::proxy_set,
-            api::proxy_test,
-            api::check_update,
-            api::open_url,
-            api::set_orientation,
-            api::set_text_interaction,
-            api::api_login,
-            api::api_register,
-            api::api_logout,
-            api::api_me,
-            api::api_account_history,
-            api::api_account_history_record,
-            api::api_account_history_delete,
-            api::api_feed,
-            api::api_original_videos,
-            api::api_topics,
-            api::api_topic,
-            api::api_tags,
-            api::api_tag_videos,
-            api::api_post_tag,
-            api::api_category,
-            api::api_rank,
-            api::api_search,
-            api::api_search_hot,
-            api::cache_clear,
-            api::api_posts,
-            api::api_post,
-            api::api_post_playback,
-            api::api_post_like,
-            api::api_post_collect,
-            api::api_post_comments,
-            api::api_post_categories,
-            api::api_post_category,
-            api::api_related,
-            api::api_following,
-            api::api_user,
-            api::api_user_stats,
-            api::api_user_videos,
-            api::api_video,
-            api::api_play,
-            api::api_comments,
-            api::api_comment_send,
-            api::api_like,
-            api::api_collect,
-            api::api_follow,
+            api::platform::security_set,
+            api::platform::debug_log,
+            api::platform::net_diag,
+            api::lines::line_state,
+            api::lines::line_set,
+            api::lines::line_custom_set,
+            api::lines::line_reset,
+            api::lines::line_cancel,
+            api::lines::line_mirrors,
+            api::lines::line_probe,
+            api::lines::line_auto,
+            api::lines::line_try_main,
+            api::lines::line_health,
+            api::lines::proxy_state,
+            api::lines::proxy_set,
+            api::lines::proxy_test,
+            api::update::check_update,
+            api::update::open_url,
+            api::platform::set_orientation,
+            api::platform::set_text_interaction,
+            api::account::api_login,
+            api::account::api_register,
+            api::account::api_logout,
+            api::account::api_me,
+            api::account::api_account_history,
+            api::account::api_account_history_record,
+            api::account::api_account_history_delete,
+            api::feed::api_feed,
+            api::feed::api_original_videos,
+            api::feed::api_topics,
+            api::feed::api_topic,
+            api::feed::api_tags,
+            api::feed::api_tag_videos,
+            api::feed::api_post_tag,
+            api::feed::api_category,
+            api::feed::api_rank,
+            api::feed::api_search,
+            api::feed::api_search_hot,
+            api::platform::cache_clear,
+            api::feed::api_posts,
+            api::feed::api_post,
+            api::feed::api_post_playback,
+            api::interact::api_post_like,
+            api::interact::api_post_collect,
+            api::interact::api_post_comments,
+            api::feed::api_post_categories,
+            api::feed::api_post_category,
+            api::feed::api_related,
+            api::feed::api_following,
+            api::feed::api_user,
+            api::feed::api_user_stats,
+            api::feed::api_user_videos,
+            api::video::api_video,
+            api::video::api_play,
+            api::video::api_comments,
+            api::video::api_comment_send,
+            api::interact::api_like,
+            api::interact::api_collect,
+            api::interact::api_follow,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

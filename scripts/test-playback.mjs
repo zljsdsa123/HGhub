@@ -12,22 +12,27 @@ import { chromium } from "playwright-core";
 import { createServer as createViteServer } from "vite";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const scriptScenarios = {
+  tv: { script: "test-tv-remote.mjs", timeout: 480000, metrics: { transport: "mock Tauri IPC; actual TV bootstrap, worker, library and player" } },
+  "post-flicker": { script: "test-post-flicker.mjs", timeout: 240000, metrics: { transport: "mock Tauri IPC; real PostDetail/AppProvider/Player; local HLS fixture" } },
+};
+const ALL_SCENARIOS = ["seek", "legacy", "lifecycle", "gesture", "proxy", "portrait-fit", "ios-native", "recovery", "review", "tv", "post-flicker"];
 const { values: args } = parseArgs({ options: {
   "media-dir": { type: "string" }, output: { type: "string" }, "browser-executable": { type: "string" },
-  scenarios: { type: "string", default: "seek,legacy,stall,lifecycle,mms,gesture,proxy" }, help: { type: "boolean" },
+  scenarios: { type: "string", default: "seek,legacy,lifecycle,gesture,proxy,portrait-fit" }, help: { type: "boolean" },
 } });
 if (args.help) {
-  console.log("pnpm test:playback [--media-dir DIR] [--output NEW_DIR] [--browser-executable PATH] [--scenarios seek,legacy,stall,lifecycle,mms,gesture,proxy,ios-native,recovery,review]");
+  console.log(`pnpm test:playback [--media-dir DIR] [--output NEW_DIR] [--browser-executable PATH] [--scenarios all|${ALL_SCENARIOS.join(",")}]`);
   process.exit(0);
 }
-const scenarios = args.scenarios.split(",");
-assert(scenarios.length && scenarios.every(s => ["seek", "legacy", "stall", "lifecycle", "mms", "gesture", "proxy", "ios-native", "recovery", "review"].includes(s)), "Unknown scenario");
+const scenarios = args.scenarios === "all" ? ALL_SCENARIOS : args.scenarios.split(",");
+assert(scenarios.length && scenarios.every(s => ALL_SCENARIOS.includes(s)), "Unknown scenario");
 const output = resolve(args.output || join(root, "test-results", "playback", new Date().toISOString().replace(/[:.]/g, "-")));
 await mkdir(dirname(output), { recursive: true });
 await mkdir(output); // Refuse to overwrite artifacts from an earlier run.
 const jsonl = (file, entry) => appendFileSync(file, JSON.stringify({ ts: new Date().toISOString(), ...entry }) + "\n");
 const report = { started: new Date().toISOString(), platform: process.platform, browser: "chromium", transport: "browser fixture; not Tauri/WKWebView", output, cases: [] };
-let temporaryMedia, vite, media, browser;
+let temporaryMedia, temporaryPortraitMedia, vite, media, portraitMedia, browser;
 let nextRequest = 0;
 const requests = new Set();
 // hls.js 的 worker/XHR 会直接请求 Linux 本机媒体代理；测试里统一映射到临时 fixture server。
@@ -70,6 +75,8 @@ async function serveMedia(dir) {
 }
 
 const getLogs = page => page.evaluate(async () => { await window.playerSeekFixture.flushLogs(); return window.playerSeekFixture.logs; });
+// 本地 VOD HLS fixture：testsrc2 + 正弦音轨。size 决定横屏（320x180）或竖屏（360x640）源。
+const generateHlsFixture = (dir, size) => execFileSync(process.env.FFMPEG_PATH || "ffmpeg", ["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", `testsrc2=size=${size}:rate=15`, "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100", "-t", "90", "-c:v", "libx264", "-preset", "ultrafast", "-g", "30", "-sc_threshold", "0", "-pix_fmt", "yuv420p", "-c:a", "aac", "-f", "hls", "-hls_time", "2", "-hls_playlist_type", "vod", "-hls_segment_filename", join(dir, "seg%03d.ts"), join(dir, "list.m3u8")], { timeout: 60000, stdio: "pipe" });
 async function waitLog(page, event, source) {
   await page.waitForFunction(({ event, source }) => window.playerSeekFixture.logs.some(e => e.event === event && (!source || e.data.source === source)), { event, source });
   return getLogs(page);
@@ -146,7 +153,18 @@ async function speedMenuKeyboardChecks(page, paused) {
   await assertSelection(1);
 }
 async function gestureChecks(page) {
-  await loadPlayer(page);
+  await page.addInitScript(() => {
+    const { promise, resolve } = Promise.withResolvers();
+    window.__playGate = promise;
+    window.__releasePlay = resolve;
+  });
+  await page.goto(`${report.ui}/tests/player-seek.html?diagnostics=1&swipe-ep=1&proxy=${encodeURIComponent(report.media)}`);
+  const guide = page.getByRole("dialog", { name: "视频长按操作提示", exact: true });
+  await guide.waitFor({ state: "visible" });
+  await page.waitForFunction(() => document.querySelector("video")?.paused);
+  await guide.getByRole("button", { name: "知道了", exact: true }).click();
+  await guide.waitFor({ state: "hidden" });
+  await page.waitForFunction(() => document.querySelector("video")?.currentTime > 1 && !document.querySelector("video").paused);
   const video = page.locator('video');
   const tap = () => page.evaluate(() => {
     const surface = document.querySelector('video').parentElement.parentElement;
@@ -169,7 +187,90 @@ async function gestureChecks(page) {
   await tap(); await tap();
   await page.waitForFunction(paused => document.querySelector('video').paused !== paused, wasPaused);
   assert.equal(await clean(), 'false', 'Double tap restores chrome and toggles playback once');
-  return {singleTapMs};
+  await page.evaluate(() => {
+    const surface = document.querySelector('video').parentElement.parentElement;
+    const bounds = surface.getBoundingClientRect();
+    surface.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, pointerId: 92, pointerType: 'touch', button: 0, clientX: bounds.x + 80, clientY: bounds.y + 220 }));
+    surface.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, pointerId: 92, pointerType: 'touch', button: 0, clientX: bounds.x + 220, clientY: bounds.y + 220 }));
+  });
+  await page.waitForFunction(() => document.querySelector('[data-seek-bar]')?.dataset.scrubbing === 'true');
+  assert.equal(await page.evaluate(() => [...document.querySelectorAll('.player-root *')].some(el => {
+    const r = el.getBoundingClientRect();
+    return r.top > 120 && r.bottom < 380 && el.textContent?.includes('/ 1:30');
+  })), false, 'Horizontal gesture scrub must only highlight the bottom progress bar without a center-screen bar');
+  await page.evaluate(() => {
+    const surface = document.querySelector('video').parentElement.parentElement;
+    const bounds = surface.getBoundingClientRect();
+    surface.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, pointerId: 92, pointerType: 'touch', button: 0, clientX: bounds.x + 220, clientY: bounds.y + 220 }));
+  });
+  await page.waitForFunction(() => !document.querySelector('[data-seek-bar]')?.dataset.scrubbing);
+  // 2.2.0 反馈回归：切集过渡期（下一集地址未解析）手势 overlay 必须常驻。
+  // 修复前第二划落在卸载后的封面/滚动列表上被丢弃或切到别的视频；修复后集数连加且视频不变。
+  await page.evaluate(() => window.playerSeekFixture.setLogging(true));
+  const swipeUp = () => page.evaluate(() => {
+    const surface = document.querySelector('[data-mobile-hold-target]') || document.querySelector('.player-root section');
+    const b = surface.getBoundingClientRect();
+    const x = b.x + b.width / 2, y0 = b.y + b.height * .7, y1 = b.y + b.height * .3;
+    const at = y => ({ bubbles: true, pointerId: 92, pointerType: 'touch', isPrimary: true, button: 0, buttons: 1, clientX: x, clientY: y });
+    surface.dispatchEvent(new PointerEvent('pointerdown', at(y0)));
+    surface.dispatchEvent(new PointerEvent('pointermove', at(y1)));
+    surface.dispatchEvent(new PointerEvent('pointerup', { ...at(y1), buttons: 0 }));
+  });
+  await swipeUp();
+  await page.locator('.mobile-video-episode').filter({ hasText: /^第2集$/ }).first().waitFor();
+  await swipeUp();
+  await page.locator('.mobile-video-episode').filter({ hasText: /^第3集$/ }).first().waitFor();
+  await page.evaluate(() => window.__releasePlay());
+  await page.waitForFunction(() => window.playerSeekFixture.logs.some(e => e.event === 'play.resolve' && e.data.video_id === 991 && e.data.episode === 3));
+  assert.equal(await page.evaluate(() => window.playerSeekFixture.logs.some(e => e.event === 'play.resolve' && e.data.video_id === 992)), false,
+    'Fast episode swipes must stay on the same video');
+  return { singleTapMs, bottomOnlyScrub: true, fastSwipeEpisodes: [2, 3], sameVideo: true };
+}
+
+// issue #142 回归：手机竖屏视口 + 真实竖屏源（360x640，高>宽）。
+// fit 判定只认解码后的 videoWidth/videoHeight（VideoSurface onSize → Feed vsize），
+// 所以必须等真实元数据落地后再断言 computed object-fit：
+//   修复前：landscapeVideo=false 且已测量、非全屏、vpLandscape=false → "cover"（裁切铺满）→ 断言失败；
+//   修复后：竖屏视频一律 "contain"（保留原始比例）→ 断言通过。
+// 第二段用横屏源验证「铺满/适应」切换链路未被修复破坏（该分支修复前后行为一致）。
+async function portraitFitChecks(page) {
+  const open = proxy => page.goto(`${report.ui}/tests/player-seek.html?diagnostics=1&portrait-fit=1&proxy=${encodeURIComponent(proxy)}`);
+  // onSize 是原生媒体事件里的 React 更新；双 rAF 保证 setVsize 已提交到 DOM（帧同步，非任意 sleep）。
+  const afterCommit = () => page.evaluate(() => new Promise(done => requestAnimationFrame(() => requestAnimationFrame(() => done(undefined)))));
+  const objectFit = () => page.locator("video").evaluate(v => getComputedStyle(v).objectFit);
+
+  await open(report.portraitMedia);
+  const guide = page.getByRole("dialog", { name: "视频长按操作提示", exact: true });
+  await guide.waitFor({ state: "visible" });
+  await guide.getByRole("button", { name: "知道了", exact: true }).click();
+  await guide.waitFor({ state: "hidden" });
+  await page.waitForFunction(() => {
+    const v = document.querySelector("video");
+    return v && v.videoWidth === 360 && v.videoHeight === 640 && v.currentTime > 1 && !v.paused;
+  });
+  await afterCommit();
+  const portrait = await page.locator("video").evaluate(v => ({
+    objectFit: getComputedStyle(v).objectFit, videoWidth: v.videoWidth, videoHeight: v.videoHeight,
+  }));
+  assert(portrait.videoHeight > portrait.videoWidth, "Fixture must decode a portrait source (h > w) to reach the portrait branch");
+  assert.equal(portrait.objectFit, "contain", "Portrait video must keep its original aspect ratio (issue #142), not crop with object-cover");
+  // 「铺满」按钮只在 landscapeVideo=true 时渲染；它不存在证明确实走了竖屏分支。
+  assert.equal(await page.getByRole("button", { name: "铺满", exact: true }).count(), 0, "Portrait source must not offer the landscape fill toggle");
+
+  // 同一手机竖屏视口换横屏源（320x180）：默认 contain，铺满→cover，适应→contain。
+  await open(report.media);
+  await page.waitForFunction(() => {
+    const v = document.querySelector("video");
+    return v && v.videoWidth === 320 && v.videoHeight === 180 && v.currentTime > 1 && !v.paused;
+  });
+  await afterCommit();
+  assert.equal(await objectFit(), "contain", "Landscape video in a portrait viewport must default to contain");
+  await page.getByRole("button", { name: "铺满", exact: true }).click();
+  await page.waitForFunction(() => getComputedStyle(document.querySelector("video")).objectFit === "cover");
+  await page.getByRole("button", { name: "适应", exact: true }).click();
+  await page.waitForFunction(() => getComputedStyle(document.querySelector("video")).objectFit === "contain");
+  return { viewport: "390x844", portrait_source: "360x640", portrait_object_fit: portrait.objectFit,
+    landscape_default_fit: "contain", landscape_toggle: ["contain", "cover", "contain"] };
 }
 
 async function seekChecks(page, legacy) {
@@ -177,6 +278,10 @@ async function seekChecks(page, legacy) {
   await clickProgress(page, .1);
   assert.equal((await getLogs(page)).length, 0, "Default-off must not record seeks");
   await page.getByRole("button", { name: "诊断设置", exact: true }).click();
+  const diagnostics = page.getByRole("button", { name: "播放诊断设置", exact: true });
+  assert.equal(await diagnostics.getAttribute("aria-expanded"), "false");
+  await diagnostics.click();
+  assert.equal(await diagnostics.getAttribute("aria-expanded"), "true");
   await page.getByRole("switch", { name: "播放诊断日志", exact: true }).click();
   await page.waitForFunction(() => document.querySelector('[aria-label="播放诊断日志"]').getAttribute("aria-checked") === "true");
   await page.getByRole("button", { name: "诊断设置", exact: true }).click();
@@ -258,70 +363,6 @@ async function seekChecks(page, legacy) {
   return { click_ms: logs.find(e => e.event === "seek.resumed" && e.data.seek === first.data.seek)?.data.elapsed_ms, drag_requests: drags.length,
     ...(!legacy ? { speed_menu_keyboard: { playing_preserved: true, paused_preserved: true, activation: ["Space", "Enter"], navigation: ["ArrowUp", "ArrowDown", "Home", "End"], exit: ["Escape", "Tab"], focus_restored: true } } : {}) };
 }
-async function stallCheck(page) {
-  await loadPlayer(page);
-  await page.waitForFunction(() => { const v = document.querySelector("video"); return v.buffered.length && v.buffered.end(0) >= 30; });
-  await page.evaluate(async () => { await window.playerSeekFixture.setLogging(true); window.playerSeekFixture.pauseBuffering(); });
-  let segmentAttempts = 0;
-  await page.route("**/seg?*", route => { segmentAttempts += 1; return route.abort("failed"); });
-  await clickProgress(page, .8);
-  const logs = await waitLog(page, "seek.timeout");
-  const timeout = logs.find(e => e.event === "seek.timeout");
-  assert(timeout.data.ready < 3 && timeout.data.seeking, "Timeout must capture the stalled media state");
-  await page.waitForTimeout(250);
-  assert(segmentAttempts < 80, `Recoverable fragment failures must not fan out into a retry storm (${segmentAttempts} attempts)`);
-  await page.unroute("**/seg?*");
-  await page.evaluate(() => window.playerSeekFixture.resumeBuffering());
-  await waitLog(page, "seek.resumed");
-  return { fault_injected: true, timeout_ms: timeout.data.elapsed_ms, segment_attempts: segmentAttempts };
-}
-async function managedMediaCheck(page) {
-  // Chromium supplies real MSE decoding/buffering; only the MMS constructor and streaming
-  // events are simulated. This tests the hls.js workaround, not macOS WebKit itself.
-  await page.addInitScript(() => {
-    const NativeMediaSource = window.MediaSource;
-    window.__managedSources = [];
-    class ManagedMediaSource extends NativeMediaSource {
-      constructor() { super(); this.streaming = true; window.__managedSources.push(this); }
-    }
-    Object.defineProperty(window, "ManagedMediaSource", { configurable: true, value: ManagedMediaSource });
-    if (new URL(location.href).searchParams.get("mms") === "only") {
-      Object.defineProperty(window, "MediaSource", { configurable: true, value: undefined });
-    }
-  });
-  const players = [];
-  for (const legacy of [false, true]) {
-    await loadPlayer(page, legacy, "&mms=both");
-    await page.evaluate(() => window.playerSeekFixture.setLogging(true));
-    let logs = await getLogs(page);
-    assert(logs.some(e => e.event === "player.snapshot" && e.data.engine === "MediaSource" && e.data.prefer_managed === false), "Standard MediaSource must be preferred when both APIs exist");
-    assert.equal(await page.evaluate(() => window.__managedSources.length), 0, "Avoid constructing MMS on standard MSE-capable browsers");
-    await loadPlayer(page, legacy, "&mms=only");
-    await page.waitForFunction(() => { const v = document.querySelector("video"); return v.buffered.length && v.buffered.end(0) >= 30; });
-    await page.evaluate(() => window.playerSeekFixture.setLogging(true));
-    logs = await getLogs(page);
-    assert(logs.some(e => e.event === "player.snapshot" && e.data.engine === "ManagedMediaSource"), "MMS-only environments must still play");
-    await page.evaluate(() => {
-      const source = window.__managedSources.find(s => s.readyState === "open");
-      source.streaming = false;
-      source.dispatchEvent(new Event("endstreaming"));
-      // A delayed endstreaming event can also arrive after seeking has resumed loading.
-      document.querySelector("video").addEventListener("seeking", () => source.dispatchEvent(new Event("endstreaming")), { once: true });
-    });
-    await page.waitForFunction(() => !window.playerSeekFixture.engineState().buffering);
-    await clickProgress(page, .8);
-    logs = await waitLog(page, "seek.resumed");
-    assert(logs.some(e => e.event === "mms.endstreaming" && e.data.buffering_enabled === false), "Test must first suspend MMS buffering");
-    assert(logs.some(e => e.event === "mms.endstreaming" && e.data.seeking && e.data.buffering_enabled === true), "Late endstreaming during seeking must not suspend buffering again");
-    assert(!logs.some(e => e.event === "mms.startstreaming"), "Recovery must not depend on a startstreaming event");
-    assert.equal(await page.evaluate(() => window.playerSeekFixture.engineState().buffering), true, "Seeking must automatically resume MMS buffering");
-    assert(!logs.some(e => e.event === "seek.timeout"));
-    players.push({ player: legacy ? "legacy" : "feed", version: logs.find(e => e.event === "app.snapshot")?.data.hls_version,
-      prefer_standard_mse: true, mms_only_recovered_without_startstreaming: true,
-      seek_ms: logs.find(e => e.event === "seek.resumed")?.data.elapsed_ms });
-  }
-  return { simulated_mms: true, players };
-}
 async function lifecyclePlayerCheck(page, legacy) {
   let release, held, holdDeadline;
   const gate = new Promise(done => { release = done; });
@@ -369,13 +410,26 @@ async function lifecyclePlayerCheck(page, legacy) {
 async function lifecycleCheck(page) {
   const feed = await lifecyclePlayerCheck(page, false);
   const legacy = await lifecyclePlayerCheck(page, true);
-  // The video mounts after the parent's inactive effect, just like a late API response.
-  await page.goto(`${report.ui}/tests/player-seek.html?diagnostics=1&inactive=1&proxy=${encodeURIComponent(report.media)}`);
-  await page.waitForFunction(() => document.querySelector("video") && window.playerSeekFixture.engineState().levels > 0);
-  await page.waitForTimeout(350);
-  assert(await page.locator("video").evaluate(v => v.paused), "Late-mounted inactive player must not autoplay");
-  assert.equal(await page.evaluate(() => window.playerSeekFixture.engineState().loading), false);
-  return { feed, legacy, late_mount_paused: true };
+  const lateMount = [];
+  for (const legacy of [false, true]) {
+    // Feed intentionally defers its play API while inactive. Mount each real
+    // player with a known source only after the parent has become inactive.
+    await page.goto(`${report.ui}/tests/player-seek.html?diagnostics=1&delayed-mount=1&proxy=${encodeURIComponent(report.media)}${legacy ? "&legacy=1" : ""}`);
+    await page.locator('[data-player-fixture][data-active="true"]').waitFor();
+    await page.evaluate(async () => { await window.playerSeekFixture.setLogging(true); window.playerSeekFixture.setActive(false); });
+    await page.locator('[data-player-fixture][data-active="false"]').waitFor();
+    assert.equal(await page.locator("video").count(), 0, "Parent must become inactive before the player mounts");
+    await page.evaluate(() => window.playerSeekFixture.setMounted(true));
+    const logs = await waitLog(page, "hls.manifest");
+    assert(await page.locator("video").evaluate(v => v.paused), "Late-mounted inactive player must not autoplay");
+    assert.equal(await page.evaluate(() => window.playerSeekFixture.engineState().loading), false, "Late-mounted inactive player must not load fragments");
+    assert(!logs.some(e => e.event === "play.request"), "Late-mounted autoplay must be gated before calling play()");
+    assert(!logs.some(e => e.event === "hlsFragLoading"), "Late-mounted inactive player must not request fragments");
+    await page.evaluate(() => window.playerSeekFixture.setActive(true));
+    await page.waitForFunction(() => document.querySelector("video").currentTime > 1 && !document.querySelector("video").paused);
+    lateMount.push({ player: legacy ? "legacy" : "video_surface", inactive_paused: true, inactive_fragment_loading: false, activated_playback: true });
+  }
+  return { feed, legacy, late_mount_paused: true, late_mount: lateMount };
 }
 
 async function proxyRecoveryCheck(page) {
@@ -430,6 +484,11 @@ async function proxyRecoveryCheck(page) {
       await page.evaluate(() => window.dispatchEvent(new Event("hg:proxy-changed")));
       await page.waitForFunction(before => window.playerSeekFixture.logs.filter(e => e.event === "proxy.restored").length > before, playingRetries);
       await page.waitForFunction(time => !document.querySelector("video").paused && document.querySelector("video").currentTime >= time, playingAt);
+      if (!legacy) {
+        await page.evaluate(() => window.dispatchEvent(new Event("hg:line-changed")));
+        assert.equal(await page.locator(".spinner").count(), 0, "Background line switch must not leave a stuck loading spinner on a healthy playing stream");
+        assert(!(await page.locator("video").evaluate(v => v.paused)), "Background line switch must keep healthy stream playing");
+      }
       const logs = await getLogs(page);
       const current = logs.filter(e => e.data.video_id).map(e => e.data.video_id);
       assert(current.every(id => id === 991), "Proxy save must retain current video");
@@ -533,22 +592,52 @@ async function explicitRecoveryCheck(page) {
 }
 
 try {
-  if (scenarios.some(name => name !== "ios-native")) {
+  if (scenarios.some(name => name !== "ios-native" && name !== "tv" && name !== "review" && name !== "post-flicker")) {
     let mediaDir = args["media-dir"] && resolve(args["media-dir"]);
     if (!mediaDir) {
       temporaryMedia = await mkdtemp(join(tmpdir(), "hghubx-playback-")); mediaDir = temporaryMedia;
-      try {
-        execFileSync(process.env.FFMPEG_PATH || "ffmpeg", ["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=15", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100", "-t", "90", "-c:v", "libx264", "-preset", "ultrafast", "-g", "30", "-sc_threshold", "0", "-pix_fmt", "yuv420p", "-c:a", "aac", "-f", "hls", "-hls_time", "2", "-hls_playlist_type", "vod", "-hls_segment_filename", join(mediaDir, "seg%03d.ts"), join(mediaDir, "list.m3u8")], { timeout: 60000, stdio: "pipe" });
-      } catch { throw new Error("Cannot generate HLS fixture: install FFmpeg (libx264/AAC), set FFMPEG_PATH, or pass --media-dir DIR"); }
+      try { generateHlsFixture(mediaDir, "320x180"); } catch { throw new Error("Cannot generate HLS fixture: install FFmpeg (libx264/AAC), set FFMPEG_PATH, or pass --media-dir DIR"); }
     }
     vite = await createViteServer({ root, server: { host: "127.0.0.1", port: 0, strictPort: false, hmr: false, open: false } });
     await vite.listen(); report.ui = `http://127.0.0.1:${vite.httpServer.address().port}`;
     media = await serveMedia(mediaDir); report.media = `http://127.0.0.1:${media.address().port}`;
+    if (scenarios.includes("portrait-fit")) {
+      temporaryPortraitMedia = await mkdtemp(join(tmpdir(), "hghubx-playback-portrait-"));
+      try { generateHlsFixture(temporaryPortraitMedia, "360x640"); } catch { throw new Error("Cannot generate portrait HLS fixture: install FFmpeg (libx264/AAC) or set FFMPEG_PATH"); }
+      portraitMedia = await serveMedia(temporaryPortraitMedia); report.portraitMedia = `http://127.0.0.1:${portraitMedia.address().port}`;
+    }
     browser = await chromium.launch({ headless: true, executablePath: args["browser-executable"], args: ["--autoplay-policy=no-user-gesture-required"] });
     report.browser_version = browser.version();
   }
   for (const name of scenarios) {
     const dir = join(output, name); await mkdir(dir);
+    if (scriptScenarios[name]) {
+      const result = { name, status: "running", started: new Date().toISOString() }; report.cases.push(result);
+      let stdout = "", stderr = "";
+      try {
+        const child = await promisify(execFile)(process.execPath, [join(root, "scripts", scriptScenarios[name].script)], {
+          cwd: root, encoding: "utf8", timeout: scriptScenarios[name].timeout, maxBuffer: 8 * 1024 * 1024,
+          env: { ...process.env, ...(args["browser-executable"] ? { BROWSER_EXECUTABLE: args["browser-executable"] } : {}) },
+        });
+        stdout = child.stdout; stderr = child.stderr;
+        result.metrics = { exit_code: 0, ...scriptScenarios[name].metrics };
+        result.status = "passed"; console.log(`PASS ${name}: ${JSON.stringify(result.metrics)}`);
+      } catch (error) {
+        stdout = error.stdout || ""; stderr = error.stderr || "";
+        result.status = "failed"; result.error = error.message;
+        result.exit_code = typeof error.code === "number" ? error.code : null;
+        result.signal = error.signal || null;
+        console.error(`FAIL ${name}: ${error.message}`);
+      } finally {
+        if (stdout) process.stdout.write(stdout);
+        if (stderr) process.stderr.write(stderr);
+        await writeFile(join(dir, "stdout.log"), stdout);
+        await writeFile(join(dir, "stderr.log"), stderr);
+        result.finished = new Date().toISOString();
+        await writeFile(join(output, "report.json"), JSON.stringify(report, null, 2) + "\n");
+      }
+      continue;
+    }
     if (name === "ios-native") {
       const result = { name, status: "running", started: new Date().toISOString() }; report.cases.push(result);
       let stdout = "", stderr = "";
@@ -576,7 +665,35 @@ try {
       }
       continue;
     }
-    const context = await browser.newContext({ ...(name === "gesture" ? {userAgent:"Mozilla/5.0 (iPhone; CPU iPhone OS 17_1_1 like Mac OS X) AppleWebKit/605.1.15 Version/17.1 Mobile/15E148 Safari/604.1",hasTouch:true} : {}), viewport: { width: 1000, height: 900 } });
+    if (name === "review") {
+      const result = { name, status: "running", started: new Date().toISOString() }; report.cases.push(result);
+      let stdout = "", stderr = "";
+      try {
+        const child = await promisify(execFile)(process.execPath, [join(root, "scripts/test-round-review.mjs")], {
+          cwd: root, encoding: "utf8", timeout: 180000, maxBuffer: 4 * 1024 * 1024,
+          env: { ...process.env, ...(args["browser-executable"] ? { BROWSER_EXECUTABLE: args["browser-executable"] } : {}) },
+        });
+        stdout = child.stdout; stderr = child.stderr;
+        result.metrics = { focused_checks: true };
+        result.status = "passed"; console.log(`PASS ${name}: ${JSON.stringify(result.metrics)}`);
+      } catch (error) {
+        stdout = error.stdout || ""; stderr = error.stderr || "";
+        result.status = "failed"; result.error = error.message;
+        result.exit_code = typeof error.code === "number" ? error.code : null;
+        result.signal = error.signal || null;
+        console.error(`FAIL ${name}: ${error.message}`);
+      } finally {
+        if (stdout) process.stdout.write(stdout);
+        if (stderr) process.stderr.write(stderr);
+        await writeFile(join(dir, "stdout.log"), stdout);
+        await writeFile(join(dir, "stderr.log"), stderr);
+        result.finished = new Date().toISOString();
+        await writeFile(join(output, "report.json"), JSON.stringify(report, null, 2) + "\n");
+      }
+      continue;
+    }
+    const mobileContext = name === "gesture" || name === "portrait-fit";
+    const context = await browser.newContext({ ...(mobileContext ? {userAgent:"Mozilla/5.0 (iPhone; CPU iPhone OS 17_1_1 like Mac OS X) AppleWebKit/605.1.15 Version/17.1 Mobile/15E148 Safari/604.1",hasTouch:true} : {}), viewport: name === "portrait-fit" ? { width: 390, height: 844 } : { width: 1000, height: 900 } });
     await context.exposeBinding("collectPlaybackLogs", (_source, entries) => {
       for (const e of entries) jsonl(join(dir, "playback.jsonl"), { ts: e.data.at, event: `web.${e.event}`, data: e.data, transport: "browser-fixture" });
     });
@@ -587,7 +704,7 @@ try {
     await context.route("**/*", route => {
       const raw = route.request().url(), url = new URL(raw), mapped = fixtureMediaUrl(raw);
       if (mapped !== raw) return route.continue({ url: mapped });
-      if ([report.ui, report.media].includes(url.origin)) return route.continue();
+      if ([report.ui, report.media, report.portraitMedia].includes(url.origin)) return route.continue();
       externalRequests.push({ protocol: url.protocol, host: url.hostname }); return route.abort("blockedbyclient");
     });
     const ids = new WeakMap(); let requestId = 0;
@@ -599,21 +716,7 @@ try {
     const result = { name, status: "running", started: new Date().toISOString() }; report.cases.push(result);
     let deadline;
     try {
-      if (name === "review") {
-        result.metrics = await new Promise((resolve, reject) => {
-          const child = spawn(process.execPath, [join(root, "scripts/test-round-review.mjs")], {
-            cwd: root,
-            env: { ...process.env, BROWSER_EXECUTABLE: args["browser-executable"] || chromium.executablePath() },
-            stdio: "inherit",
-          });
-          child.once("error", reject);
-          child.once("close", code => code === 0 ? resolve({ focused_checks: true }) : reject(new Error(`Round review checks exited ${code}`)));
-        });
-        result.status = "passed";
-        console.log(`PASS ${name}: ${JSON.stringify(result.metrics)}`);
-        continue;
-      }
-      const action = name === "recovery" ? explicitRecoveryCheck(page) : name === "proxy" ? proxyRecoveryCheck(page) : name === "gesture" ? gestureChecks(page) : name === "seek" || name === "legacy" ? seekChecks(page, name === "legacy") : name === "stall" ? stallCheck(page) : name === "mms" ? managedMediaCheck(page) : lifecycleCheck(page);
+      const action = name === "recovery" ? explicitRecoveryCheck(page) : name === "proxy" ? proxyRecoveryCheck(page) : name === "gesture" ? gestureChecks(page) : name === "portrait-fit" ? portraitFitChecks(page) : name === "seek" || name === "legacy" ? seekChecks(page, name === "legacy") : lifecycleCheck(page);
       result.metrics = await Promise.race([action, new Promise((_, reject) => { deadline = setTimeout(() => reject(new Error("Scenario exceeded 45 seconds")), 45000); })]);
       assert.deepEqual(pageErrors, [], "Browser script errors");
       assert.deepEqual(externalRequests, [], "Unexpected external network requests");
@@ -638,8 +741,10 @@ try {
   await browser?.close();
   for (const socket of requests) socket.destroy();
   if (media) await new Promise(done => media.close(done));
+  if (portraitMedia) await new Promise(done => portraitMedia.close(done));
   await vite?.close();
   if (temporaryMedia) await rm(temporaryMedia, { recursive: true, force: true });
+  if (temporaryPortraitMedia) await rm(temporaryPortraitMedia, { recursive: true, force: true });
   report.finished = new Date().toISOString();
   report.passed = report.cases.filter(c => c.status === "passed").length;
   report.failed = report.cases.filter(c => c.status !== "passed").length + (report.setup_error ? 1 : 0);

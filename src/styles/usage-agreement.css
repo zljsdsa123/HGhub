@@ -1,12 +1,12 @@
 /* Startup agreement owns the viewport; no application surface is mounted behind it. */
 .hg-agreement {
-  position:fixed; inset:0; z-index:10000; display:flex; align-items:center; justify-content:center;
-  padding:max(12px,env(safe-area-inset-top)) max(12px,env(safe-area-inset-right)) max(12px,env(safe-area-inset-bottom)) max(12px,env(safe-area-inset-left));
+  position:fixed; top:0; right:0; bottom:0; left:0; height:100%; height:100dvh; box-sizing:border-box; overflow:hidden; z-index:10000; display:flex; align-items:center; justify-content:center;
+  padding:calc(var(--native-sat,0px) + 12px) calc(var(--native-sar,0px) + 12px) calc(var(--native-sab,0px) + 12px) calc(var(--native-sal,0px) + 12px);
+  padding:max(12px,var(--native-sat,0px),env(safe-area-inset-top)) max(12px,var(--native-sar,0px),env(safe-area-inset-right)) max(12px,var(--native-sab,0px),env(safe-area-inset-bottom)) max(12px,var(--native-sal,0px),env(safe-area-inset-left));
   background:var(--p-bg,#101113); color:var(--p-on,#f2f3f5); font-family:var(--font-sans,system-ui,sans-serif);
 }
-.hg-agreement-card { display:flex; flex-direction:column; width:min(100%,680px); max-height:100%; min-height:0; overflow:hidden; border:1px solid var(--ios-edge,rgba(128,128,128,.3)); border-radius:28px; background:var(--p-s1,#1c1e22); box-shadow:0 18px 60px rgba(0,0,0,.16); }
+.hg-agreement-card { display:flex; flex-direction:column; width:100%; max-width:680px; height:100%; max-height:820px; min-height:0; overflow:hidden; border:1px solid var(--ios-edge,rgba(128,128,128,.3)); border-radius:28px; background:var(--p-s1,#1c1e22); box-shadow:0 18px 60px rgba(0,0,0,.16); }
 .hg-agreement-header { padding:24px 24px 16px; flex:none; }
-.hg-agreement-kicker { font-size:12px; color:var(--p-mut,#a9adb6); letter-spacing:.06em; }
 .hg-agreement-header h1 { margin-top:8px; font-size:clamp(21px,4.7vw,26px); font-weight:750; line-height:1.35; outline:none; }
 .hg-agreement-summary { margin-top:10px; font-size:13px; line-height:1.65; color:var(--p-mut,#a9adb6); }
 .hg-agreement-scroll { min-height:0; overflow-y:auto; overscroll-behavior:contain; padding:4px 24px 20px; scroll-padding:16px; flex:1 1 auto; }
@@ -35,7 +35,7 @@
 }
 @media(max-height:560px) {
   .hg-agreement-card { display:block; overflow-y:auto; overscroll-behavior:contain; }
-  .hg-agreement-scroll { overflow:visible; }
+  .hg-agreement-scroll { max-height:35vh; overflow-y:auto; }
   .hg-agreement-header { padding-top:16px; }
 }
 @media(prefers-reduced-motion:reduce) { .hg-agreement-actions button { transition:none; } }

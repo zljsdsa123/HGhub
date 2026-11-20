@@ -15,6 +15,8 @@ const state = {
   searchHist: ["保留搜索记录"], volume: 0.42, muted: false,
   muteOnStartup: false, swipeEp: false, preferHevc: true,
 };
+// 迁移会为新字段补默认值（#146-3 全屏闲置隐藏秒数）：旧种子不带该字段，落盘应补齐。
+const migrated = { ...state, fsIdleSecs: 3 };
 const oldData = {
   hghub_app_v1: JSON.stringify(state), hghub_swipe_ep_v2: "1", hghub_theme: "light",
 };
@@ -72,12 +74,12 @@ try {
 
   {
     const { context, page } = await open(oldData);
-    assert.deepEqual(await snapshot(page), { ...state, theme: "light" });
+    assert.deepEqual(await snapshot(page), { ...migrated, theme: "light" });
     assert.equal(await page.evaluate(() => window.storageMigrationFixture.getThemePreference()), "light");
     assert.equal(await page.evaluate(() => window.initialTheme), true);
     const saved = await storage(page);
     assert.deepEqual(Object.keys(saved).sort(), ["hghubx_app_v1", "hghubx_swipe_ep_v2", "hghubx_theme"]);
-    assert.deepEqual(JSON.parse(saved.hghubx_app_v1), state);
+    assert.deepEqual(JSON.parse(saved.hghubx_app_v1), migrated);
     await page.evaluate(() => window.storageMigrationFixture.setTheme("system"));
     await page.waitForFunction(() => localStorage.getItem("hghubx_theme") === "system");
     await page.emulateMedia({ colorScheme: "dark" });
@@ -92,12 +94,12 @@ try {
     await page.waitForFunction(() => localStorage.getItem("hghubx_theme") === "dark" && JSON.parse(localStorage.getItem("hghubx_app_v1")).history.length === 0);
     await page.reload();
     await page.waitForFunction(() => window.storageMigrationFixture?.strictSecurityReady);
-    assert.deepEqual(await snapshot(page), { ...state, history: [], theme: "dark" });
+    assert.deepEqual(await snapshot(page), { ...migrated, history: [], theme: "dark" });
     await context.close();
     console.log("PASS: legacy data, swipe opt-out, adaptive and explicit appearance survive migration and restart");
   }
   {
-    const newer = { ...state, favs: [99], history: [] };
+    const newer = { ...migrated, favs: [99], history: [] };
     const { context, page } = await open({ ...oldData, hghubx_app_v1: JSON.stringify(newer), hghubx_theme: "dark", hghubx_swipe_ep_v2: "1" });
     assert.deepEqual(await snapshot(page), { ...newer, theme: "dark" });
     assert.equal(await page.evaluate(() => window.initialTheme), false);
@@ -117,12 +119,12 @@ try {
   }
   for (const failure of ["write", "remove"]) {
     const { context, page } = await open(oldData, failure);
-    assert.deepEqual(await snapshot(page), { ...state, theme: "light" });
+    assert.deepEqual(await snapshot(page), { ...migrated, theme: "light" });
     const saved = await storage(page);
     for (const [key, value] of Object.entries(oldData)) assert.equal(saved[key], value);
     await page.reload();
     await page.waitForFunction(() => window.storageMigrationFixture?.strictSecurityReady);
-    assert.deepEqual(await snapshot(page), { ...state, theme: "light" });
+    assert.deepEqual(await snapshot(page), { ...migrated, theme: "light" });
     await context.close();
     console.log(`PASS: ${failure} failure retains legacy data and preferences across restarts`);
   }

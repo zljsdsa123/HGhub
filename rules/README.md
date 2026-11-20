@@ -6,14 +6,14 @@
 
 | 匹配方式 | 域名 / 后缀 | 用途及证据 |
 | --- | --- | --- |
-| 后缀 | `huangguoai.com` | 固定 API 线路 1，正文相对 URL 的基址；`src-tauri/src/net.rs`、`src/html.ts` |
-| 后缀 | `huangguoai.ai` | 固定 API 线路 2；`src-tauri/src/lines.rs` |
-| 精确 | `huangguoai.pages.dev` | 镜像发布页及其 `publish.js`；`src-tauri/src/lines.rs` |
-| 后缀 | `drleao.cn` | 图片 CDN 样本 `pic.drleao.cn`；`src-tauri/src/media.rs` 联网测试 |
-| 后缀 | `hzjvlo.cn` | 视频 CDN 样本 `yd-lphu-hls.hzjvlo.cn`；`src-tauri/src/media.rs` 联网测试 |
-| 后缀 | `xxbgwypx.cc` | 镜像样本 `thu.xxbgwypx.cc` 及动态子域；`src-tauri/src/lines.rs` 测试 |
-| 精确 | `api.github.com` | GitHub Release 更新元数据；`src-tauri/src/api.rs` |
-| 精确 | `github.com` | 更新页面，用户点击后交给外部浏览器；`src-tauri/src/api.rs` |
+| 后缀 | `huangguoai.com` | 唯一的固定 API 线路，正文相对 URL 的基址；`src-tauri/src/net/`、`src/shared/lib/html.ts` |
+| 后缀 | `huangguoai.ai` | 导航站，保留分流规则，但不作为固定 API 线路；`src-tauri/src/lines/mirror.rs` |
+| 精确 | `huangguoai.pages.dev` | 镜像发布页及其 `publish.js`；`src-tauri/src/lines/` |
+| 后缀 | `drleao.cn` | 图片 CDN 样本 `pic.drleao.cn`；`src-tauri/src/media/` 联网测试 |
+| 后缀 | `hzjvlo.cn` | 视频 CDN 样本 `yd-lphu-hls.hzjvlo.cn`；`src-tauri/src/media/` 联网测试 |
+| 后缀 | `xxbgwypx.cc` | 镜像样本 `thu.xxbgwypx.cc` 及动态子域；`src-tauri/src/lines/` 测试 |
+| 精确 | `api.github.com` | GitHub Release 更新元数据；`src-tauri/src/api/update.rs` |
+| 精确 | `github.com` | 更新页面，用户点击后交给外部浏览器；`src-tauri/src/api/update.rs` |
 
 CDN 和镜像三条后缀来自仓库已有样本，不能据此认定它们当前仍在使用。当前发布页在线核对返回 HTTP 403。API 返回的封面、播放地址，HLS 子清单、分片、密钥、重定向地址及镜像列表都可能引入新域名，因此这是一份源码已知目标清单，不是完整流量白名单。新域名应依据代理连接日志继续补充。
 

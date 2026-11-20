@@ -37,7 +37,7 @@ Windows / macOS / Linux / Android / iOS · iOS 圆角与玻璃材质 · 沉浸�
 
 ## 仿冒提醒
 
-> 🚫 **已发现的恶意修改版**：[`hichuv 仓库`](https://github.com/hichuv 仓库)
+> 🚫 **已发现的恶意修改版**：[`hichuv` 仓库](https://github.com/hichuv)
 >
 > 该仓库与本项目无关，是在旧版本源码基础上擅自加入**卡密验证、VIP 付费解锁**等变现功能的修改版，
 > 代码改动不透明、安全性无法验证。**请勿下载、勿注册、勿付费**；如已安装，建议立即卸载，改用官方 Release 包安装。
@@ -56,6 +56,23 @@ Windows / macOS / Linux / Android / iOS · iOS 圆角与玻璃材质 · 沉浸�
 - 本地收藏、观看记录、偏好、切集迁移标记和主题使用 `hghubx_*` 存储键。首次启动时，当前 WebView 存储中的旧 `hghub_*` 数据会迁移到新键；已有新数据优先，确认写入成功后才清理对应旧键。写入失败时保留并读取旧数据，下次启动重试。此迁移针对同一存储空间，不会跨应用标识或跨浏览器配置目录读取其他安装的数据。
 - 环境变量统一使用 `HGHUBX_PROXY`、`HGHUBX_STRICT`、`HGHUBX_TEST_COVER_URL`、`HGHUBX_TEST_MEDIA_URL` 和 `HGHUBX_TEST_MEDIA_OUTPUT`。旧 `HGHUB_*` 名称继续兼容；新变量未设置时才回退旧变量，显式设置的新值（包括空值）优先。安全模式的命令行参数仍优先于环境变量。
 - 网络诊断中的显式代理字段统一为 `HGHUBX_PROXY`，展示兼容读取后的有效值并保持脱敏。
+
+## 工程入口
+
+开发者和 coding agent 先读 [`AGENTS.md`](AGENTS.md)，再按
+[`docs/subsystems/`](docs/subsystems/README.md) 找到要修改的子系统；当前行为、验证命令和变更
+协议都以这两处为准。`make check` 是本地统一入口，GitHub Actions 是合并门禁和验证记录。
+
+项目目录与依赖关系见 [`docs/architecture.md`](docs/architecture.md)：
+
+| 目录 | 内容 |
+| --- | --- |
+| `src/app/` | 应用装配、页面栈、窗口壳与启动门 |
+| `src/features/` | 首页与 Feed、播放、账号、分类、发现、图文、搜索、设置 |
+| `src/tv/` | 独立 Android TV 版界面、遥控器焦点与本地搜索片库 |
+| `src/shared/` | IPC、共享状态、存储、自动选线、诊断与跨功能 UI |
+| `src/styles/`、`src/index.css` | 统一样式入口与样式文件 |
+| `src-tauri/src/` | Rust 的 API、网络、媒体、线路与平台实现 |
 
 ## License
 

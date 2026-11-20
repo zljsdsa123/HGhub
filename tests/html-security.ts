@@ -1,4 +1,4 @@
-import { handleArticleClick, sanitizeHtml, setStrictSecurity } from "../src/html";
+import { handleArticleClick, sanitizeHtml, setStrictSecurity } from "../src/shared/lib/html";
 import DOMPurify from "dompurify";
 
 const fixture = document.querySelector<HTMLDivElement>("#fixture")!;

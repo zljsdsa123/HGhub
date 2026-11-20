@@ -1,19 +1,37 @@
 .post-player-slot { position:relative; min-width:0; }
 .post-player { width:100%; height:100%; isolation:isolate; color:#fff; }
-.post-player:fullscreen { width:100vw; height:100vh; height:100dvh; }
+.post-player:fullscreen,
+.post-player:-webkit-full-screen { width:100vw; height:100vh; height:100dvh; }
 .post-player .player-inline-controls {
   position:absolute; z-index:2; inset-inline:0; bottom:0;
   padding:4px 12px 8px; opacity:1; transition:opacity .18s ease;
   color:#fff; text-shadow:0 1px 3px rgb(0 0 0 / .8);
 }
 .post-player[data-fullscreen=true] .player-inline-controls {
-  padding-left:max(12px,env(safe-area-inset-left,0px));
-  padding-right:max(12px,env(safe-area-inset-right,0px));
-  padding-bottom:max(8px,env(safe-area-inset-bottom,0px));
+  padding-left:max(16px,var(--sal,0px),env(safe-area-inset-left,0px));
+  padding-right:max(16px,var(--sar,0px),env(safe-area-inset-right,0px));
+  padding-bottom:max(10px,var(--sab,0px),env(safe-area-inset-bottom,0px));
 }
 .post-player-seek-row { display:flex; align-items:center; gap:10px; min-width:0; }
-.post-player-seek-row .hg-range { width:0; min-width:0; flex:1; min-height:28px; }
+.post-player-seek-wrap { position:relative; display:flex; align-items:center; width:0; min-width:0; flex:1; }
+.post-player-seek-wrap .hg-range { width:100%; min-width:0; flex:1; min-height:28px; }
+.post-player-seek-pill {
+  position:absolute; bottom:calc(100% + 6px); transform:translateX(-50%); pointer-events:none;
+  padding:3px 10px; border-radius:999px; background:rgb(10 13 18 / .82); backdrop-filter:blur(10px);
+  box-shadow:0 4px 14px rgb(0 0 0 / .45), inset 0 0 0 1px rgb(255 255 255 / .15);
+  font-size:12px; font-variant-numeric:tabular-nums; white-space:nowrap;
+}
+.post-player-seek-pill>span { color:rgb(255 255 255 / .66); }
+.post-player[data-scrubbing=true] input[type="range"].hg-range::-webkit-slider-runnable-track {
+  height:7px; background:linear-gradient(to right, #fff var(--fill,0%), rgb(255 255 255 / .32) var(--fill,0%));
+  box-shadow:0 0 12px rgb(255 255 255 / .4);
+}
+.post-player[data-scrubbing=true] input[type="range"].hg-range::-webkit-slider-thumb {
+  width:17px; height:17px; margin-top:-5px; background:#fff;
+  box-shadow:0 0 0 4px rgb(255 255 255 / .24), 0 2px 8px rgb(0 0 0 / .6);
+}
 .post-player-time { flex:none; white-space:nowrap; font-size:11px; font-variant-numeric:tabular-nums; }
+.post-player[data-scrubbing=true] .post-player-time { color:#fff; font-weight:700; }
 .post-player-actions { display:flex; align-items:center; justify-content:space-between; gap:8px; }
 .post-player-actions>.ios-button {
   display:flex; align-items:center; justify-content:center; flex:none;
@@ -24,7 +42,7 @@
 .post-player-actions>.ios-button:focus-visible { outline:2px solid #fff; outline-offset:-2px; }
 /* Touch devices have no hover; only fine-pointer desktops fade the controls. */
 @media (hover:hover) and (pointer:fine) {
-  .post-player[data-playing=true]:not(:hover):not(:focus-within) .player-inline-controls { opacity:0; pointer-events:none; }
+  .post-player[data-playing=true]:not([data-scrubbing=true]):not(:hover):not(:focus-within) .player-inline-controls { opacity:0; pointer-events:none; }
 }
 @media (prefers-reduced-motion:reduce) {
   .post-player .player-inline-controls { transition:none; }

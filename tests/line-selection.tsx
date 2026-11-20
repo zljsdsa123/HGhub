@@ -1,9 +1,9 @@
 import { useEffect } from "react";
 import { createRoot } from "react-dom/client";
-import { AppProvider, useStore } from "../src/store";
-import Settings from "../src/pages/Settings";
-import { ToastHost } from "../src/components/ui";
-import { autoLineEnabled, initAutoLine, pickLine } from "../src/autoLine";
+import { AppProvider, useStore } from "../src/shared/model/store";
+import Settings from "../src/features/settings/Settings";
+import { ToastHost } from "../src/shared/ui/ui";
+import { autoLineEnabled, initAutoLine, pickLine } from "../src/shared/network/autoLine";
 import "../src/index.css";
 
 Object.assign(window, { lineSelectionControls: { autoLineEnabled, initAutoLine, pickLine } });

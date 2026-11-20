@@ -58,9 +58,13 @@ try {
       writeText: async () => { fixture.webCopies++; throw new DOMException("The request is not allowed by the user agent", "NotAllowedError"); },
     } });
   });
-  const load = async () => {
+  const load = async (group = "网络") => {
     await page.goto(`${origin}tests/diagnostic-copy.html`);
-    await page.waitForFunction(() => !document.querySelector('[aria-label="播放诊断日志"]').disabled);
+    await page.waitForFunction(() => document.querySelector('[aria-label="播放诊断日志"]')?.disabled === false);
+    const trigger = page.getByRole("button", { name: `${group}设置`, exact: true });
+    assert.equal(await trigger.getAttribute("aria-expanded"), "false");
+    await trigger.click();
+    assert.equal(await trigger.getAttribute("aria-expanded"), "true");
   };
   const networkButton = () => page.getByRole("button").filter({ has: page.getByText("网络诊断", { exact: true }) });
 
@@ -100,7 +104,7 @@ try {
   assert.equal(await page.getByRole("textbox", { name: "网络诊断报告" }).count(), 0);
   report.passed.push("Diagnostic failure is distinct from clipboard failure and never reports a successful copy");
 
-  await load();
+  await load("播放诊断");
   await page.getByRole("button").filter({ has: page.getByText("复制播放诊断日志", { exact: true }) }).click();
   await page.waitForFunction(() => window.diagnosticCopyFixture.nativeCopies.length === 1);
   assert.equal(await page.evaluate(() => window.diagnosticCopyFixture.nativeCopies[0]), '{"event":"fixture.playback","data":{"unicode":"诊断日志"}}\n');
@@ -108,7 +112,7 @@ try {
   report.passed.push("Playback logs use the same native copy path after async reading, preserving Unicode and newlines");
 
   for (const failure of ["emptyLog", "failRead"]) {
-    await load();
+    await load("播放诊断");
     await page.evaluate(key => { window.diagnosticCopyFixture[key] = true; }, failure);
     await page.getByRole("button").filter({ has: page.getByText("复制播放诊断日志", { exact: true }) }).click();
     await page.getByText(failure === "emptyLog" ? "尚无诊断日志，请开启后复现问题" : "fixture: log unavailable", { exact: true }).waitFor();
@@ -116,7 +120,7 @@ try {
   }
   report.passed.push("Empty or unreadable logs are not copied");
 
-  await load();
+  await load("播放诊断");
   await page.evaluate(() => { window.diagnosticCopyFixture.failCopy = true; });
   await page.getByRole("button").filter({ has: page.getByText("复制播放诊断日志", { exact: true }) }).click();
   await page.getByText("复制日志失败", { exact: true }).waitFor();

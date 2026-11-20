@@ -80,7 +80,7 @@ pub fn set_strict_security(strict: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn is_internal_webview_host(name: &str) -> bool {
+pub(crate) fn is_internal_webview_host(name: &str) -> bool {
     let name = name.trim_end_matches('.').to_ascii_lowercase();
     matches!(
         name.as_str(),

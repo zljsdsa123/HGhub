@@ -15,6 +15,7 @@
  *   node scripts/patch-android-splash.mjs
  *   （tauri.conf.json 的 beforeBuildCommand 已自动调用，一般不用手动跑）
  */
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -125,3 +126,123 @@ for (const directory of directories) {
 // of the day/night variants patched.
 for (const [path, xml] of pending) writeFileSync(path, xml);
 console.log(`[splash] Android ${themeCount} 个主题背景已对齐 → ${BRAND}（更新 ${pending.size} 个文件）`);
+
+// Standard edition (com.hghubx.app): keep edge-to-edge video while exposing
+// native system-bar, cutout and keyboard insets as CSS variables.
+// Old WebViews (e.g. Chromium 66 car headunits) lack CSS env(safe-area-inset-*)
+// and report zero cutout despite persistent status/dock bars (#138).
+const appActivityPath = join(root, "src-tauri", "gen", "android", "app", "src", "main", "java", "com", "hghubx", "app", "MainActivity.kt");
+if (existsSync(appActivityPath)) {
+  const templateActivity = `package com.hghubx.app
+import android.os.Bundle
+import androidx.activity.enableEdgeToEdge
+class MainActivity : TauriActivity() {
+  override fun onCreate(savedInstanceState: Bundle?) {
+    enableEdgeToEdge()
+    super.onCreate(savedInstanceState)
+  }
+}`;
+  const patchedActivity = `package com.hghubx.app
+
+import android.graphics.Rect
+import android.os.Build
+import android.os.Bundle
+import android.view.View
+import android.view.ViewGroup
+import android.view.WindowManager
+import android.webkit.WebView
+import androidx.activity.enableEdgeToEdge
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
+import kotlin.math.roundToInt
+
+class MainActivity : TauriActivity() {
+  private var barsStyle = ""
+  private var imeBottom = 0
+  private var webViewHooked = false
+
+  private fun findWebView(view: View?): WebView? {
+    if (view is WebView) return view
+    if (view is ViewGroup) {
+      for (i in 0 until view.childCount) {
+        findWebView(view.getChildAt(i))?.let { return it }
+      }
+    }
+    return null
+  }
+
+  private fun keyboardOverlap(webView: WebView): Int {
+    if (imeBottom == 0 || webView.height == 0) return 0
+    val keyboardTop = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+      windowManager.currentWindowMetrics.bounds.bottom - imeBottom
+    } else {
+      Rect().also { webView.getWindowVisibleDisplayFrame(it) }.bottom
+    }
+    // Count only the part still covered if Android already resized the WebView.
+    val position = IntArray(2)
+    webView.getLocationOnScreen(position)
+    val overlap = (position[1] + webView.height - keyboardTop).coerceIn(0, webView.height)
+    return (overlap / webView.resources.displayMetrics.density.coerceAtLeast(1f)).roundToInt()
+  }
+
+  private fun pushInsets(content: View) {
+    if (barsStyle.isEmpty()) return
+    val wv = findWebView(content) ?: return
+    val keyboard = keyboardOverlap(wv)
+    val keyboardStyle = if (keyboard > 0) "s.setProperty('--native-ime-overlap','\${keyboard}px');"
+      else "s.removeProperty('--native-ime-overlap');"
+    val script = "(function(){var s=document.documentElement&&document.documentElement.style;if(!s)return;" +
+      barsStyle + keyboardStyle + "})();"
+    wv.evaluateJavascript(script, null)
+    if (!webViewHooked) {
+      webViewHooked = true
+      for (delay in longArrayOf(150L, 600L, 1500L)) {
+        wv.postDelayed({ pushInsets(content) }, delay)
+      }
+    }
+  }
+
+  override fun onCreate(savedInstanceState: Bundle?) {
+    enableEdgeToEdge()
+    super.onCreate(savedInstanceState)
+    window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
+    val content = findViewById<View>(android.R.id.content) ?: return
+    ViewCompat.setOnApplyWindowInsetsListener(content) { view, insets ->
+      val bars = insets.getInsets(
+        WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
+      )
+      val density = view.resources.displayMetrics.density.coerceAtLeast(1f)
+      val top = (bars.top / density).roundToInt()
+      val right = (bars.right / density).roundToInt()
+      val bottom = (bars.bottom / density).roundToInt()
+      val left = (bars.left / density).roundToInt()
+      imeBottom = insets.getInsets(WindowInsetsCompat.Type.ime()).bottom
+      barsStyle =
+        "s.setProperty('--native-sat','\${top}px');" +
+          "s.setProperty('--native-sar','\${right}px');" +
+          "s.setProperty('--native-sab','\${bottom}px');" +
+          "s.setProperty('--native-sal','\${left}px');"
+      pushInsets(content)
+      insets
+    }
+    content.viewTreeObserver.addOnGlobalLayoutListener {
+      if (!webViewHooked || imeBottom > 0) pushInsets(content)
+    }
+    ViewCompat.requestApplyInsets(content)
+  }
+}
+`;
+  const normalize = (text) => text.trim().replace(/\s+/g, " ");
+  const currentActivity = readFileSync(appActivityPath, "utf8");
+  const normalized = normalize(currentActivity);
+  // Also accept projects already generated with the previous bars-only bridge.
+  const previousPatchedHash = "52a0435284e8cd76196b4e73ab2f8394f041675f7736af31e6c083aae4e72c31";
+  if (![templateActivity, patchedActivity].some((expected) => normalize(expected) === normalized) &&
+      createHash("sha256").update(normalized).digest("hex") !== previousPatchedHash) {
+    fail(appActivityPath, "MainActivity 与已知 Tauri 模板不同，请审阅原生改动后更新补丁");
+  }
+  if (normalized !== normalize(patchedActivity)) {
+    writeFileSync(appActivityPath, patchedActivity);
+  }
+  console.log("[splash] Android 标准版系统栏与软键盘安全区桥接已写入 MainActivity.kt");
+}

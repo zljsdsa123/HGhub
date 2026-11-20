@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Home controls fixture</title>
+    <style>
+      html,body,#root{width:100%;height:100%;margin:0;overflow:hidden;background:#0b0e15}
+      .probe-stage{position:relative;width:100%;height:100%;overflow:hidden;background:radial-gradient(circle at 52% 24%,#72505a 0,#293445 34%,#111722 66%,#080b11 100%)}
+      .probe-stage:before{content:"";position:absolute;left:50%;top:18%;width:130px;height:280px;transform:translateX(-50%);border-radius:48% 48% 20px 20px;background:linear-gradient(110deg,#171b25,#3c3541 52%,#141822);opacity:.8}
+      @media(max-height:560px),(orientation:landscape) and (max-height:680px){.probe-stage:before{top:12%;width:110px;height:230px}}
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/tests/home-controls.tsx"></script>
+  </body>
+</html>

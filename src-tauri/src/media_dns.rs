@@ -55,7 +55,9 @@ fn answers(value: &Value, port: u16) -> Result<Resolution, String> {
     let mut addresses = Vec::new();
     let mut ttl = 30;
     for record in records {
-        ttl = ttl.min(record["TTL"].as_u64().unwrap_or(0));
+        if let Some(r_ttl) = record["TTL"].as_u64() {
+            ttl = ttl.min(r_ttl.max(1));
+        }
         if record["type"].as_u64() != Some(1) {
             continue;
         }

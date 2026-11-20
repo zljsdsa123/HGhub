@@ -1,23 +1,166 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-hg-launching>
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <meta name="theme-color" content="#101012" />
+    <meta name="theme-color" content="#071218" />
     <title>HGhubX · 短剧</title>
     <script>
       try {
         // 旧主题仅用于首次升级的首帧；React 启动后会迁移并清理旧键。
-        const preference = localStorage.getItem("hghubx_theme") ?? localStorage.getItem("hghub_theme");
-        const dark = preference === "dark" || (preference !== "light" && matchMedia("(prefers-color-scheme: dark)").matches);
+        // 启动动画覆盖期间保持 #071218 系统栏色，退场时再同步到目标主题背景。
+        var preference = localStorage.getItem("hghubx_theme");
+        if (preference === null) preference = localStorage.getItem("hghub_theme");
+        var dark = preference === "dark" || (preference !== "light" && matchMedia("(prefers-color-scheme: dark)").matches);
         if (!dark) document.documentElement.classList.add("theme-light");
-        document.querySelector('meta[name="theme-color"]').content = dark ? "#121212" : "#eeece7";
+        document.documentElement.style.colorScheme = dark ? "dark" : "light";
       } catch (e) {}
     </script>
-    <style>html,body{background:#071218}</style>
+    <script>
+      // Keep this listener ES5 and outside the module graph: a parse error in
+      // the application bundle occurs before its own diagnostics can start.
+      (function () {
+        var ready = false;
+        var firstFailure = null;
+        var panel = null;
+        var timer = null;
+        var readyTimer = null;
+        var version = /(?:Chrome|Chromium)\/([\d.]+)/.exec(navigator.userAgent);
+        function scriptName(value) {
+          var name = String(value || "").split(/[?#]/)[0].split("/").pop();
+          return /^[A-Za-z0-9_.-]+\.(?:js|mjs|css)$/.test(name) ? name : "";
+        }
+        function errorKind(error, message) {
+          var name = error && error.name;
+          if (/^(?:SyntaxError|ReferenceError|TypeError|RangeError)$/.test(name)) return name;
+          if (/\bSyntaxError\b|Unexpected token|Unexpected identifier|Invalid or unexpected token/.test(message || "")) return "SyntaxError";
+          if (/\bReferenceError\b|is not defined/.test(message || "")) return "ReferenceError";
+          if (/\bTypeError\b|is not a function/.test(message || "")) return "TypeError";
+          return "StartupError";
+        }
+        function copy(text, button) {
+          var field = document.createElement("textarea");
+          field.value = text;
+          field.readOnly = true;
+          field.style.cssText = "position:fixed;top:0;left:0;width:1px;height:1px;opacity:0";
+          document.body.appendChild(field);
+          field.select();
+          var copied = false;
+          try { copied = document.execCommand("copy"); } catch (e) {}
+          document.body.removeChild(field);
+          button.textContent = copied ? "已复制诊断" : "请拍照记录下方诊断";
+          button.focus();
+        }
+        function show() {
+          if (!document.body || !firstFailure || panel) return;
+          panel = document.createElement("section");
+          panel.id = "hg-startup-error";
+          panel.setAttribute("role", "alertdialog");
+          panel.setAttribute("aria-modal", "true");
+          panel.setAttribute("aria-labelledby", "hg-startup-error-title");
+          panel.style.cssText = "position:fixed;top:0;right:0;bottom:0;left:0;z-index:2147483647;box-sizing:border-box;overflow:auto;padding:32px;background:#101012;color:#f5f5f7;font:16px/1.65 sans-serif;text-align:left";
+          var title = document.createElement("h1");
+          title.id = "hg-startup-error-title";
+          title.textContent = "HGhubX 启动遇到问题";
+          title.style.cssText = "margin:0 0 16px;font-size:24px;color:#f5f5f7";
+          var explanation = document.createElement("p");
+          explanation.textContent = "请复制下方诊断反馈。如果设备支持更新 Android System WebView，可更新后重试。";
+          explanation.style.cssText = "margin:0 0 16px;color:#c9c9d0";
+          var diagnostic = "HGhubX startup\nWebView: " + (version ? version[1] : "unknown") + "\nError: " + firstFailure.kind;
+          if (firstFailure.file) diagnostic += "\nAsset: " + firstFailure.file;
+          if (firstFailure.line) diagnostic += "\nPosition: " + firstFailure.line + ":" + firstFailure.column;
+          var detail = document.createElement("pre");
+          detail.textContent = diagnostic;
+          detail.style.cssText = "white-space:pre-wrap;word-wrap:break-word;padding:16px;background:#232325;border-radius:12px;color:#f5f5f7;font:14px/1.7 monospace";
+          var retry = document.createElement("button");
+          retry.type = "button";
+          retry.textContent = "重新启动";
+          retry.onclick = function () { location.reload(); };
+          var copyButton = document.createElement("button");
+          copyButton.type = "button";
+          copyButton.textContent = "复制诊断";
+          copyButton.onclick = function () { copy(diagnostic, copyButton); };
+          var buttons = [retry, copyButton];
+          for (var i = 0; i < buttons.length; i++) {
+            buttons[i].style.cssText = "min-width:132px;min-height:48px;margin:12px 12px 12px 0;padding:10px 18px;border:2px solid #74b7ff;border-radius:12px;background:#193c60;color:#f5f5f7;font:16px sans-serif;cursor:pointer";
+            buttons[i].onfocus = function () { this.style.outline = "3px solid #f5cc66"; this.style.outlineOffset = "3px"; };
+            buttons[i].onblur = function () { this.style.outline = ""; };
+          }
+          panel.appendChild(title);
+          panel.appendChild(explanation);
+          panel.appendChild(detail);
+          panel.appendChild(retry);
+          panel.appendChild(copyButton);
+          panel.addEventListener("keydown", function (event) {
+            var key = event.key || "";
+            var code = event.keyCode;
+            if (/^Arrow(?:Left|Right|Up|Down)$/.test(key) || (code >= 37 && code <= 40) || key === "Tab") {
+              event.preventDefault(); event.stopPropagation();
+              (document.activeElement === retry ? copyButton : retry).focus();
+            } else if (key === "Enter" || code === 13 || code === 23) {
+              event.preventDefault(); event.stopPropagation();
+              if (document.activeElement === copyButton) copyButton.click(); else retry.click();
+            }
+          });
+          document.body.appendChild(panel);
+          retry.focus();
+        }
+        function fail(kind, file, line, column) {
+          if (firstFailure && (firstFailure.kind !== "StartupTimeout" || kind === "StartupTimeout")) return;
+          // A later concrete error is more useful than the watchdog timeout.
+          if (panel && panel.parentNode) panel.parentNode.removeChild(panel);
+          panel = null;
+          // Do not include exception values, stack traces, request URLs, account
+          // data or query strings in the user-copyable diagnostic.
+          firstFailure = { kind: kind, file: scriptName(file), line: Number(line) || 0, column: Number(column) || 0 };
+          show();
+        }
+        window.__HG_STARTUP__ = { ready: function () {
+          // A child effect may throw while the parent's effect still runs.
+          // Let the current commit/error-reporting task finish before marking
+          // startup healthy, and never erase a concrete error already caught.
+          clearTimeout(readyTimer);
+          readyTimer = setTimeout(function () {
+            clearTimeout(timer);
+            if (firstFailure && firstFailure.kind !== "StartupTimeout") {
+              show();
+              return;
+            }
+            ready = true;
+            if (panel && panel.parentNode) panel.parentNode.removeChild(panel);
+            panel = null;
+            firstFailure = null;
+          }, 0);
+        } };
+        window.addEventListener("error", function (event) {
+          if (ready) return;
+          var target = event.target;
+          if (target && (target.tagName === "SCRIPT" || (target.tagName === "LINK" && target.rel === "stylesheet"))) {
+            fail("ResourceLoadError", target.src || target.href, 0, 0);
+          } else if (event.message) {
+            fail(errorKind(event.error, event.message), event.filename, event.lineno, event.colno);
+          }
+        }, true);
+        window.addEventListener("unhandledrejection", function (event) {
+          var msg = event.reason && event.reason.message ? String(event.reason.message) : "";
+          if (!ready) fail(errorKind(event.reason, msg), "", 0, 0);
+        });
+        document.addEventListener("DOMContentLoaded", show);
+        timer = setTimeout(function () {
+          if (!ready) fail("StartupTimeout", "", 0, 0);
+        }, 15000);
+      })();
+    </script>
+    <style>
+      html, body { margin: 0; background: #071218; }
+      html[data-hg-launching], html[data-hg-launching] body {
+        background-color: #071218 !important;
+        background-image: radial-gradient(circle at 50% 44%, rgba(96, 205, 255, .09), rgba(6, 70, 91, .05) 34%, transparent 64%) !important;
+      }
+    </style>
   </head>
   <body>
     <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
+    <script type="module" src="/src/editionEntry.ts"></script>
   </body>
 </html>
